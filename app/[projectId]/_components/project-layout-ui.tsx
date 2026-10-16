@@ -73,10 +73,23 @@ import {
   ASK_AGENT_EVENT,
   OPEN_WORKSPACE_FILE_EVENT,
   OPEN_WORKSPACE_FOLDER_EVENT,
+  FIND_CITATION_REQUEST_EVENT,
+  APPLY_CITATION_EVENT,
+  AUDIT_CITATIONS_REQUEST_EVENT,
+  FOCUS_DOCUMENT_RANGE_EVENT,
+  setPendingCitationToApply,
+  setActiveCitationHighlight,
+  openWorkspaceEntry,
   SELECTION_MAX_CHARS,
   type OpenWorkspaceFileDetail,
   type OpenWorkspaceFolderDetail,
+  type FindCitationRequestDetail,
+  type AuditCitationsRequestDetail,
+  type FocusDocumentRangeDetail,
 } from "@/lib/chat-context";
+import { CitationReviewDock, type CitationApprovalState } from "./editors/citation-review-dock";
+import { findCitationForSelectionAction } from "../citation-finding-actions";
+import type { CitationFindMatch } from "@/lib/citation-finder";
 import { OPEN_LITERATURE_SEARCH_EVENT, type OpenLiteratureSearchDetail } from "@/lib/literature/types";
 import { PROJECT_BIBLIOGRAPHY_PATH } from "@/lib/project-bibliography";
 import { isMarkdownFilePath } from "@/lib/project-settings";
@@ -251,6 +264,7 @@ export function ProjectLayoutUI({
     previewFilePathRef.current = previewFilePath;
   }, [openFiles, activeFilePath, previewFilePath]);
   const [draggedFilePath, setDraggedFilePath] = useState<string>();
+  const [citationApprovalState, setCitationApprovalState] = useState<CitationApprovalState | null>(null);
   const [selection, setSelection] = useState<WorkspaceSelection>();
   const [pendingConversationPath, setPendingConversationPath] = useState<string>();
   const [mobileAgentHeight, setMobileAgentHeight] = useState(0);
@@ -440,6 +454,232 @@ export function ProjectLayoutUI({
     window.addEventListener(OPEN_LITERATURE_SEARCH_EVENT, openLiteratureSearch);
     return () => window.removeEventListener(OPEN_LITERATURE_SEARCH_EVENT, openLiteratureSearch);
   }, [projectId]);
+
+  useEffect(() => {
+    const handleFindCitation = async (event: Event) => {
+      const detail = (event as CustomEvent<FindCitationRequestDetail>).detail;
+      if (!detail?.text) return;
+      setCitationApprovalState({
+        isOpen: true,
+        text: detail.text,
+        range: detail.range,
+        draftFilePath: detail.draftFilePath,
+        status: "searching",
+      });
+      try {
+        const res = await findCitationForSelectionAction(projectId, detail.text);
+        if (res.found) {
+          setCitationApprovalState((prev) =>
+            prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+          );
+        } else {
+          setCitationApprovalState((prev) =>
+            prev ? { ...prev, status: "not_found", error: res.message } : null,
+          );
+        }
+      } catch (err) {
+        setCitationApprovalState((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: "error",
+                error: err instanceof Error ? err.message : "Failed to find citation.",
+              }
+            : null,
+        );
+      }
+    };
+    window.addEventListener(FIND_CITATION_REQUEST_EVENT, handleFindCitation);
+    return () => window.removeEventListener(FIND_CITATION_REQUEST_EVENT, handleFindCitation);
+  }, [projectId]);
+
+  useEffect(() => {
+    const handleAuditCitations = async (event: Event) => {
+      const detail = (event as CustomEvent<AuditCitationsRequestDetail>).detail;
+      if (!detail || !detail.claims || detail.claims.length === 0) return;
+
+      const firstClaim = detail.claims[0];
+      setCitationApprovalState({
+        isOpen: true,
+        draftFilePath: detail.draftFilePath,
+        text: firstClaim.text,
+        range: { from: firstClaim.from, to: firstClaim.to },
+        status: "searching",
+        auditQueue: {
+          claims: detail.claims,
+          currentIndex: 0,
+          approvedCount: 0,
+          skippedCount: 0,
+        },
+      });
+
+      try {
+        const res = await findCitationForSelectionAction(projectId, firstClaim.text);
+        if (res.found) {
+          setCitationApprovalState((prev) =>
+            prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+          );
+        } else {
+          setCitationApprovalState((prev) =>
+            prev ? { ...prev, status: "not_found", error: res.message } : null,
+          );
+        }
+      } catch (err) {
+        setCitationApprovalState((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: "error",
+                error: err instanceof Error ? err.message : "Failed to find citation.",
+              }
+            : null,
+        );
+      }
+    };
+
+    window.addEventListener(AUDIT_CITATIONS_REQUEST_EVENT, handleAuditCitations);
+    return () => window.removeEventListener(AUDIT_CITATIONS_REQUEST_EVENT, handleAuditCitations);
+  }, [projectId]);
+
+  const handleNavigateAuditClaim = async (
+    targetIndex: number,
+    approvedDelta = 0,
+    skippedDelta = 0,
+  ) => {
+    const current = citationApprovalState;
+    if (!current?.auditQueue) return;
+
+    const { claims, approvedCount, skippedCount } = current.auditQueue;
+    const nextApproved = approvedCount + approvedDelta;
+    const nextSkipped = skippedCount + skippedDelta;
+
+    if (targetIndex >= claims.length) {
+      setCitationApprovalState({
+        ...current,
+        status: "not_found",
+        auditQueue: {
+          ...current.auditQueue,
+          currentIndex: claims.length - 1,
+          approvedCount: nextApproved,
+          skippedCount: nextSkipped,
+          completed: true,
+        },
+      });
+      return;
+    }
+
+    const clampedIndex = Math.max(0, Math.min(targetIndex, claims.length - 1));
+    const nextClaim = claims[clampedIndex];
+
+    window.dispatchEvent(
+      new CustomEvent<FocusDocumentRangeDetail>(FOCUS_DOCUMENT_RANGE_EVENT, {
+        detail: {
+          filePath: current.draftFilePath,
+          from: nextClaim.from,
+          to: nextClaim.to,
+          text: nextClaim.text,
+        },
+      }),
+    );
+
+    setCitationApprovalState({
+      isOpen: true,
+      draftFilePath: current.draftFilePath,
+      text: nextClaim.text,
+      range: { from: nextClaim.from, to: nextClaim.to },
+      status: "searching",
+      auditQueue: {
+        claims,
+        currentIndex: clampedIndex,
+        approvedCount: nextApproved,
+        skippedCount: nextSkipped,
+      },
+    });
+
+    try {
+      const res = await findCitationForSelectionAction(projectId, nextClaim.text);
+      if (res.found) {
+        setCitationApprovalState((prev) =>
+          prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+        );
+      } else {
+        setCitationApprovalState((prev) =>
+          prev ? { ...prev, status: "not_found", error: res.message } : null,
+        );
+      }
+    } catch (err) {
+      setCitationApprovalState((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "error",
+              error: err instanceof Error ? err.message : "Failed to find citation.",
+            }
+          : null,
+      );
+    }
+  };
+
+  const handleSkipClaim = () => {
+    if (!citationApprovalState?.auditQueue) return;
+    void handleNavigateAuditClaim(
+      citationApprovalState.auditQueue.currentIndex + 1,
+      0,
+      1,
+    );
+  };
+
+  const handleApproveCitation = (
+    match: CitationFindMatch,
+    range: { from: number; to: number },
+    draftFilePath: string,
+  ) => {
+    const detail = {
+      filePath: draftFilePath,
+      range,
+      citationKey: match.citationKey,
+      reference: match.reference,
+    };
+    setPendingCitationToApply(detail);
+    if (activeFilePath !== draftFilePath) {
+      openWorkspaceEntry({ path: draftFilePath });
+    }
+    window.dispatchEvent(
+      new CustomEvent(APPLY_CITATION_EVENT, { detail }),
+    );
+
+    if (citationApprovalState?.auditQueue) {
+      void handleNavigateAuditClaim(
+        citationApprovalState.auditQueue.currentIndex + 1,
+        1,
+        0,
+      );
+    } else {
+      setCitationApprovalState(null);
+    }
+  };
+
+  // Synchronize the active citation highlight state so the target sentence remains
+  // highlighted across the editor and connected to the dock until the dock is closed.
+  useEffect(() => {
+    if (citationApprovalState && citationApprovalState.isOpen) {
+      setActiveCitationHighlight({
+        active: true,
+        filePath: citationApprovalState.draftFilePath,
+        from: citationApprovalState.range.from,
+        to: citationApprovalState.range.to,
+        text: citationApprovalState.text,
+      });
+    } else {
+      setActiveCitationHighlight(null);
+    }
+  }, [
+    citationApprovalState?.isOpen,
+    citationApprovalState?.draftFilePath,
+    citationApprovalState?.range?.from,
+    citationApprovalState?.range?.to,
+    citationApprovalState?.text,
+  ]);
 
   // Folder mention chips in the chat reveal the folder in the File Explorer
   // rather than opening an editor tab. Like the literature handoff above, the
@@ -1759,6 +1999,20 @@ export function ProjectLayoutUI({
       />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <WorkspaceTour />
+      <CitationReviewDock
+        state={citationApprovalState}
+        onClose={() => setCitationApprovalState(null)}
+        onReject={() => {
+          if (citationApprovalState?.auditQueue) {
+            handleSkipClaim();
+          } else {
+            setCitationApprovalState(null);
+          }
+        }}
+        onApprove={handleApproveCitation}
+        onSkipClaim={handleSkipClaim}
+        onNavigateClaim={(idx) => void handleNavigateAuditClaim(idx)}
+      />
     </WorkspaceContext.Provider>
     </MatrixTargetsProvider>
   );

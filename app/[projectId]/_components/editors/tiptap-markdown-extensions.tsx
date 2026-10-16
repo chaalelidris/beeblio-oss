@@ -25,7 +25,7 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { SELECTION_ANCHOR_MAX_CHARS, SELECTION_MAX_CHARS, type SelectionRange } from "@/lib/chat-context";
+import { SELECTION_ANCHOR_MAX_CHARS, SELECTION_MAX_CHARS, type SelectionRange, type CitationHighlightActiveDetail } from "@/lib/chat-context";
 import { cn } from "@/lib/utils";
 import { citationKeys, formatCitation, supportsNarrativeCitation, type CitationMode, type CitationReference, type CitationStyle } from "@/lib/citations";
 import type { LiteratureMetrics } from "@/lib/literature/types";
@@ -514,6 +514,95 @@ export const MentionSearchHighlight = Extension.create<{
                 style: "outline: none !important; border: none !important; box-shadow: none !important;",
               }),
             ]);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+export const CitationDockHighlightExtension = Extension.create<{
+  getHighlight: () => CitationHighlightActiveDetail | null;
+}>({
+  name: "citationDockHighlight",
+  addOptions() {
+    return {
+      getHighlight: () => null,
+    };
+  },
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("citationDockHighlight"),
+        props: {
+          decorations: (state) => {
+            const highlight = this.options.getHighlight();
+            if (!highlight || !highlight.active) {
+              return DecorationSet.empty;
+            }
+
+            const docSize = state.doc.content.size;
+            let from = typeof highlight.from === "number" ? highlight.from : 0;
+            let to = typeof highlight.to === "number" ? highlight.to : 0;
+            const text = highlight.text?.trim();
+
+            // 1. Check if existing from..to bounds accurately contain the target passage
+            if (from >= 0 && to <= docSize && from < to) {
+              const currentText = state.doc.textBetween(from, to, " ").trim();
+              if (!text || currentText === text || currentText.includes(text.slice(0, 20))) {
+                return DecorationSet.create(state.doc, [
+                  Decoration.inline(from, to, {
+                    class: "beeblio-citation-dock-highlight",
+                  }),
+                ]);
+              }
+            }
+
+            // 2. Fallback: locate text across doc descendants if positions shifted
+            if (text && text.length > 5) {
+              let matchedFrom: number | null = null;
+              let matchedTo: number | null = null;
+
+              state.doc.descendants((node, pos) => {
+                if (matchedFrom !== null) return false;
+                if (node.isTextblock && node.textContent.includes(text)) {
+                  const idx = node.textContent.indexOf(text);
+                  if (idx >= 0) {
+                    matchedFrom = pos + 1 + idx;
+                    matchedTo = matchedFrom + text.length;
+                    return false;
+                  }
+                }
+              });
+
+              if (
+                matchedFrom !== null &&
+                matchedTo !== null &&
+                matchedFrom < matchedTo &&
+                matchedTo <= docSize
+              ) {
+                return DecorationSet.create(state.doc, [
+                  Decoration.inline(matchedFrom, matchedTo, {
+                    class: "beeblio-citation-dock-highlight",
+                  }),
+                ]);
+              }
+            }
+
+            // 3. Fallback: clamped from/to
+            if (from < to) {
+              const clampedFrom = Math.max(0, Math.min(from, docSize));
+              const clampedTo = Math.max(clampedFrom, Math.min(to, docSize));
+              if (clampedFrom < clampedTo) {
+                return DecorationSet.create(state.doc, [
+                  Decoration.inline(clampedFrom, clampedTo, {
+                    class: "beeblio-citation-dock-highlight",
+                  }),
+                ]);
+              }
+            }
+
+            return DecorationSet.empty;
           },
         },
       }),

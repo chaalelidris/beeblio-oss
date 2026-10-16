@@ -2417,3 +2417,21 @@ del.beeblio-diff-del {
 .blog-prose .hljs-strong {
   font-weight: 600;
 }
+
+/* ============================================================
+   Citation Review Dock active sentence highlight:
+   Keeps the targeted sentence highlighted in the document editor
+   as long as the dock is open, even during dock movement/drag.
+   ============================================================ */
+.beeblio-citation-dock-highlight {
+  background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 28%, transparent);
+  border-radius: 4px;
+  position: relative;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dark .beeblio-citation-dock-highlight {
+  background-color: color-mix(in oklab, var(--primary) 28%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 42%, transparent);
+}

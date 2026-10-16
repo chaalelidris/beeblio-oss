@@ -29,7 +29,31 @@ import {
   type DocumentDefaultSettings,
 } from "@/lib/project-settings";
 import { OPEN_LITERATURE_SEARCH_EVENT, type LiteratureItem, type OpenLiteratureSearchDetail } from "@/lib/literature/types";
-import { OPEN_WORKSPACE_FILE_EVENT, type OpenWorkspaceFileDetail } from "@/lib/chat-context";
+import {
+  OPEN_WORKSPACE_FILE_EVENT,
+  FIND_CITATION_REQUEST_EVENT,
+  APPLY_CITATION_EVENT,
+  AUDIT_CITATIONS_REQUEST_EVENT,
+  FOCUS_DOCUMENT_RANGE_EVENT,
+  getPendingCitationToApply,
+  setPendingCitationToApply,
+  CITATION_HIGHLIGHT_ACTIVE_EVENT,
+  getActiveCitationHighlight,
+  type OpenWorkspaceFileDetail,
+  type FindCitationRequestDetail,
+  type ApplyCitationDetail,
+  type AuditCitationsRequestDetail,
+  type FocusDocumentRangeDetail,
+  type CitationHighlightActiveDetail,
+} from "@/lib/chat-context";
+import {
+  auditDocumentClaims,
+  auditParagraphClaims,
+  extractSentences,
+  hasCitation,
+  detectClaimSignal,
+  type UncitedClaim,
+} from "@/lib/claim-auditor";
 import { BIBLIOGRAPHY_MARKER, joinBibliographyMetadata, normalizeEscapedCitations, splitBibliographyMetadata } from "@/lib/markdown-bibliography";
 import { ensureBlankLineAfterTables } from "@/lib/markdown-repair";
 import { PROJECT_BIBLIOGRAPHY_PATH } from "@/lib/project-bibliography";
@@ -61,7 +85,7 @@ import {
   workspacePathRelativeToDocument,
 } from "./markdown-image-path";
 import {
-  CitationContext, CitationNode, DIAGRAM_EXTENSIONS, DiffAddition, DiffDeletion, Frontmatter, IMAGE_EXTENSIONS, ImportantCallout,
+  CitationContext, CitationNode, CitationDockHighlightExtension, DIAGRAM_EXTENSIONS, DiffAddition, DiffDeletion, Frontmatter, IMAGE_EXTENSIONS, ImportantCallout,
   MarkdownCodeBlock, MarkdownHeading, MarkdownParagraph, MarkdownSubscript, MarkdownSuperscript,
   MarkdownTextStyle, MentionSearchHighlight, documentSelectionAt, fileExtension, isVisualFile, workspaceImage,
 } from "./tiptap-markdown-extensions";
@@ -446,6 +470,66 @@ export function MarkdownTiptapEditor({
     setMentionSearch(null);
   };
 
+  const appliedCitationsRef = useRef<Set<string>>(new Set());
+  const activeCitationHighlightRef = useRef<CitationHighlightActiveDetail | null>(
+    getActiveCitationHighlight(),
+  );
+
+  const applyFoundCitation = useCallback((detail: ApplyCitationDetail) => {
+    if (detail.filePath !== filePathRef.current) return;
+    const current = editorRef.current;
+    if (!current || current.isDestroyed) return;
+
+    const eventKey = `${detail.citationKey}:${detail.range.from}-${detail.range.to}`;
+    if (appliedCitationsRef.current.has(eventKey)) return;
+    appliedCitationsRef.current.add(eventKey);
+
+    setPendingCitationToApply(null);
+
+    setReferences((prev) => {
+      if (!detail.reference || prev.some((r) => r.id === detail.citationKey)) return prev;
+      return [...prev, detail.reference];
+    });
+
+    current
+      .chain()
+      .focus()
+      .setTextSelection(detail.range.to)
+      .insertContent([
+        { type: "text", text: " " },
+        { type: "citation", attrs: { id: detail.citationKey } },
+      ])
+      .run();
+
+    toast.success(`Citation added: @${detail.citationKey}`);
+  }, []);
+
+  useEffect(() => {
+    const handleApply = (event: Event) => {
+      const detail = (event as CustomEvent<ApplyCitationDetail>).detail;
+      if (detail) {
+        applyFoundCitation(detail);
+      }
+    };
+    window.addEventListener(APPLY_CITATION_EVENT, handleApply);
+    return () => window.removeEventListener(APPLY_CITATION_EVENT, handleApply);
+  }, [applyFoundCitation]);
+
+  const handleRequestFindCitation = (params: { from: number; to: number; text: string }) => {
+    const trimmed = params.text.trim();
+    if (!trimmed) return;
+    window.dispatchEvent(
+      new CustomEvent<FindCitationRequestDetail>(FIND_CITATION_REQUEST_EVENT, {
+        detail: {
+          projectId,
+          draftFilePath: filePathRef.current,
+          text: trimmed,
+          range: { from: params.from, to: params.to },
+        },
+      }),
+    );
+  };
+
   const insertFileMention = async (entry: FileEntry) => {
     const search = mentionSearchRef.current;
     const current = editorRef.current;
@@ -699,6 +783,9 @@ export function MarkdownTiptapEditor({
     Frontmatter,
     ImportantCallout,
     CitationNode,
+    CitationDockHighlightExtension.configure({
+      getHighlight: () => activeCitationHighlightRef.current,
+    }),
     MentionSearchHighlight.configure({
       getDismissedFrom: () => mentionDismissedFromRef.current,
       getSlashDismissedFrom: () => slashDismissedFromRef.current,
@@ -922,6 +1009,94 @@ export function MarkdownTiptapEditor({
   }, [extensions]);
   editorRef.current = editor;
 
+  useEffect(() => {
+    const handleFocusRange = (event: Event) => {
+      const detail = (event as CustomEvent<FocusDocumentRangeDetail>).detail;
+      if (!detail || detail.filePath !== filePathRef.current || !editor) return;
+      try {
+        const docSize = editor.state.doc.content.size;
+        const clampedFrom = Math.max(0, Math.min(detail.from, docSize));
+        const clampedTo = Math.max(clampedFrom, Math.min(detail.to, docSize));
+        editor.chain().focus().setTextSelection({ from: clampedFrom, to: clampedTo }).scrollIntoView().run();
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener(FOCUS_DOCUMENT_RANGE_EVENT, handleFocusRange);
+    return () => window.removeEventListener(FOCUS_DOCUMENT_RANGE_EVENT, handleFocusRange);
+  }, [editor]);
+
+  useEffect(() => {
+    const handleHighlightChange = (e: Event) => {
+      const detail = (e as CustomEvent<CitationHighlightActiveDetail>).detail;
+      if (!editor || editor.isDestroyed) return;
+      if (detail && detail.active && detail.filePath === filePathRef.current) {
+        activeCitationHighlightRef.current = detail;
+      } else {
+        activeCitationHighlightRef.current = null;
+      }
+      editor.view.dispatch(editor.state.tr);
+    };
+
+    window.addEventListener(CITATION_HIGHLIGHT_ACTIVE_EVENT, handleHighlightChange);
+    return () => {
+      window.removeEventListener(CITATION_HIGHLIGHT_ACTIVE_EVENT, handleHighlightChange);
+    };
+  }, [editor]);
+
+  const handleAuditCitations = () => {
+    if (!editor) return;
+    const claims: UncitedClaim[] = [];
+
+    // Traverse editor text blocks to find claims and accurate ProseMirror positions
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isTextblock && (node.type.name === "paragraph" || node.type.name === "blockquote")) {
+        const paraText = node.textContent;
+        if (paraText.length < 32) return;
+
+        const paraClaims = auditParagraphClaims(paraText, pos + 1);
+        for (const c of paraClaims) {
+          claims.push({
+            ...c,
+            id: `claim-${claims.length + 1}-${c.from}`,
+          });
+        }
+      }
+    });
+
+    if (claims.length === 0) {
+      // Fallback: check document markdown text directly
+      const text = bodyMarkdownRef.current || "";
+      const textClaims = auditDocumentClaims(text);
+      claims.push(...textClaims);
+    }
+
+    if (claims.length === 0) {
+      toast.success("Citation audit clean!", {
+        description: "No uncited empirical assertions or claims were detected in this document.",
+      });
+      return;
+    }
+
+    toast.info(`Found ${claims.length} uncited claim${claims.length > 1 ? "s" : ""}`, {
+      description: "Opening review queue to find matching citations in your knowledge base.",
+    });
+
+    try {
+      editor.chain().focus().setTextSelection({ from: claims[0].from, to: claims[0].to }).scrollIntoView().run();
+    } catch {}
+
+    window.dispatchEvent(
+      new CustomEvent<AuditCitationsRequestDetail>(AUDIT_CITATIONS_REQUEST_EVENT, {
+        detail: {
+          projectId,
+          draftFilePath: filePathRef.current,
+          claims,
+        },
+      }),
+    );
+  };
+
   // Answers the layout's selection capture with source-faithful text from the
   // document model (markdown with [@key] citations) instead of the rendered
   // DOM. Positions come from the live DOM selection via posAtDOM rather than
@@ -973,6 +1148,14 @@ export function MarkdownTiptapEditor({
     citationOrderRef.current = ids;
     setCitationOrder(ids);
   }, [editor]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    const pending = getPendingCitationToApply();
+    if (pending && pending.filePath === filePathRef.current) {
+      applyFoundCitation(pending);
+    }
+  }, [editor, applyFoundCitation]);
 
   useEffect(() => {
     if (!editor) return;
@@ -1085,6 +1268,7 @@ export function MarkdownTiptapEditor({
           onEditLink={openLinkDialog}
           citationStyle={citationStyle}
           onCitationStyleChange={(style) => { hasIndividualCitationStyleRef.current = true; setCitationStyle(style); emitMarkdown(bodyMarkdownRef.current, bibliographyTitle, style); }}
+          onAuditCitations={handleAuditCitations}
           showMarkdownMode
         />
       ) : null}
@@ -1124,6 +1308,7 @@ export function MarkdownTiptapEditor({
                     disabled={mentionSearch !== null}
                     getSlashDismissedFrom={() => slashDismissedFromRef.current}
                     onSlashDismissedFromChange={(from) => { slashDismissedFromRef.current = from; }}
+                    onRequestFindCitation={handleRequestFindCitation}
                     onRequestCitation={(selection) => {
                       setLiteratureMention({ results: [], searching: false, searchedQuery: null });
                       setActiveMention(0);

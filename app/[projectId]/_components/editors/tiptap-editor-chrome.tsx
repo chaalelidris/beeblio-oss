@@ -10,7 +10,7 @@ import {
   Columns3, Folder, FolderOpen, ImagePlus, Italic, Link2, List, ListChecks, Loader2,
   ListOrdered, Minus, Pencil, PencilSparkles, Pilcrow, Plus, Quote, Radical, Redo2, RemoveFormatting, Rows3, Sigma,
   Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon,
-  Table2, Trash2, Underline, Undo2, Unlink, Upload, Workflow, Search
+  Table2, Trash2, Underline, Undo2, Unlink, Upload, Workflow, Search, ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -1235,6 +1235,7 @@ export function DocumentToolbar({
   onEditLink,
   citationStyle,
   onCitationStyleChange,
+  onAuditCitations,
   showMarkdownMode = false,
 }: {
   editor: Editor | null;
@@ -1245,6 +1246,7 @@ export function DocumentToolbar({
   onEditLink?: () => void;
   citationStyle?: CitationStyle;
   onCitationStyleChange?: (style: CitationStyle) => void;
+  onAuditCitations?: () => void;
   showMarkdownMode?: boolean;
 }) {
   const state = useEditorState({
@@ -1286,6 +1288,24 @@ export function DocumentToolbar({
                 ))}
               </SelectContent>
             </Select>
+            <ToolbarDivider />
+          </>
+        ) : null}
+
+        {onAuditCitations ? (
+          <>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={disabled}
+              onClick={onAuditCitations}
+              className="!h-8 gap-1.5 border-primary/30 bg-primary/5 px-2.5 text-xs font-semibold text-primary shadow-2xs hover:bg-primary/15 hover:text-primary focus-visible:ring-1"
+              title="Audit Citations — Scan draft for uncited empirical claims and match with bibliography"
+            >
+              <ShieldCheck className="size-3.5 text-primary" />
+              <span>Audit Citations</span>
+            </Button>
             <ToolbarDivider />
           </>
         ) : null}
