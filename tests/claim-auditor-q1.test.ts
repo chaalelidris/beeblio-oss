@@ -3,7 +3,6 @@ import { describe, test } from "node:test";
 import {
   auditParagraphClaims,
   auditDocumentClaims,
-  hasCitation,
   hasMultipleSources,
 } from "../lib/claim-auditor.ts";
 

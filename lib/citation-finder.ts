@@ -228,7 +228,6 @@ export async function findCitationForSelection(
   }
 
   const keywords = extractKeywords(query);
-  const keywordSet = new Set(keywords);
 
   const candidates: CandidatePassage[] = [];
 

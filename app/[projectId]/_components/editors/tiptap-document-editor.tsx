@@ -49,9 +49,6 @@ import {
 import {
   auditDocumentClaims,
   auditParagraphClaims,
-  extractSentences,
-  hasCitation,
-  detectClaimSignal,
   type UncitedClaim,
 } from "@/lib/claim-auditor";
 import { BIBLIOGRAPHY_MARKER, joinBibliographyMetadata, normalizeEscapedCitations, splitBibliographyMetadata } from "@/lib/markdown-bibliography";

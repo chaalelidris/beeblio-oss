@@ -338,7 +338,7 @@ export function auditParagraphClaims(paraText: string, baseOffset = 0): UncitedC
   for (let i = 0; i < sentences.length; i++) {
     const s = sentences[i];
     const sCited = hasCitation(s.text, s.following);
-    const { isClaim, signal, category, requiresMultipleSources, q1Guideline } = detectClaimSignal(s.text);
+    const { isClaim, signal, category, q1Guideline } = detectClaimSignal(s.text);
 
     // Rule 1: Only claims requiring external evidence are flagged
     if (!isClaim) continue;
