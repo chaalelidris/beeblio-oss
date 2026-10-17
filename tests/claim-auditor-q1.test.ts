@@ -84,4 +84,26 @@ Several studies have demonstrated that graphene enhances thermal conductivity [2
     assert.equal(claims[0].category, "consensus");
     assert.equal(claims[0].requiresMultipleSources, true);
   });
+
+  test("Academic Writing: distinguishes specific statistic claims from general study findings", () => {
+    // Specific statistic or technical finding requiring proximate citation
+    const statText1 = "Pressure reduction improved by 15% across all tested flow rates.";
+    const statText2 = "Global mean anomalies reached approximately 40–50 s m^(-1) by century end.";
+    const generalText = "During the historical period, low surface resistance was observed in densely vegetated areas.";
+
+    const claims1 = auditParagraphClaims(statText1);
+    assert.ok(claims1.length >= 1, "Specific percentage finding must be detected as claim");
+
+    const claims2 = auditParagraphClaims(statText2);
+    assert.ok(claims2.length >= 1, "Quantitative interval anomaly must be detected as claim");
+
+    const generalClaims = auditParagraphClaims(generalText);
+    assert.ok(generalClaims.length >= 1, "General empirical sentence without citation is flagged when paragraph has no citation");
+
+    // Ordinary within-paper contrast does not trigger disparate study flag
+    const singleStudyContrastingPara =
+      "Low surface resistance was observed in arid regions. In contrast, higher resistance values were predominantly found in humid zones. These patterns are consistent with land-atmosphere feedback models [1].";
+    const contrastClaims = auditParagraphClaims(singleStudyContrastingPara);
+    assert.equal(contrastClaims.length, 0, "Ordinary within-paper contrast in a single cited study should not trigger duplicate citation requirements");
+  });
 });

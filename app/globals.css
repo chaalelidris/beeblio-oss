@@ -2424,14 +2424,16 @@ del.beeblio-diff-del {
    as long as the dock is open, even during dock movement/drag.
    ============================================================ */
 .beeblio-citation-dock-highlight {
-  background-color: color-mix(in oklab, var(--primary) 18%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 28%, transparent);
+  background-color: color-mix(in oklab, var(--primary) 24%, transparent) !important;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 45%, transparent), 0 2px 8px color-mix(in oklab, var(--primary) 18%, transparent) !important;
   border-radius: 4px;
+  padding-block: 1px;
+  padding-inline: 2px;
   position: relative;
   transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .dark .beeblio-citation-dock-highlight {
-  background-color: color-mix(in oklab, var(--primary) 28%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 42%, transparent);
+  background-color: color-mix(in oklab, var(--primary) 34%, transparent) !important;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 65%, transparent), 0 2px 10px color-mix(in oklab, var(--primary) 28%, transparent) !important;
 }

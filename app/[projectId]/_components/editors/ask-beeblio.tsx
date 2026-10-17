@@ -6,7 +6,7 @@ import { ArrowUp, BookOpen, Check, PencilSparkles, Sparkles } from "lucide-react
 
 import { cn } from "@/lib/utils";
 import { ASK_AGENT_EVENT, SELECTION_ANCHOR_MAX_CHARS, type AskAgentDetail, type ChatFileContext } from "@/lib/chat-context";
-import { documentSelectionAt } from "./tiptap-markdown-extensions";
+import { documentSelectionAt, expandRangeToWordBoundaries } from "./tiptap-markdown-extensions";
 import { resolveWorkspaceAssetPath } from "./markdown-image-path";
 // Debounces keep the button from flickering while a selection is being dragged
 // and the ghost from flashing while arrowing between empty paragraphs.
@@ -751,10 +751,11 @@ export function AskBeeblio({
             onClick={() => {
               const current = triggerRef.current;
               if (!editor || !current || current.kind !== "selection") return;
-              const text = editor.state.doc.textBetween(current.from, current.to, " ");
+              const { from, to } = expandRangeToWordBoundaries(editor.state.doc, current.from, current.to);
+              const text = editor.state.doc.textBetween(from, to, " ");
               onRequestFindCitation({
-                from: current.from,
-                to: current.to,
+                from,
+                to,
                 text,
               });
               hide();

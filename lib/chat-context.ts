@@ -99,6 +99,12 @@ export type FindCitationRequestDetail = {
   draftFilePath: string;
   text: string;
   range: { from: number; to: number };
+  existingCitationKeys?: string[];
+  paragraphIndex?: number;
+  precedingText?: string;
+  succeedingText?: string;
+  sectionHeading?: string;
+  paragraphText?: string;
 };
 
 export type ApplyCitationDetail = {
@@ -106,6 +112,10 @@ export type ApplyCitationDetail = {
   range: { from: number; to: number };
   citationKey: string;
   reference: any;
+  text?: string;
+  citationKeys?: string[];
+  references?: any[];
+  overrideParagraphDuplicate?: boolean;
 };
 
 export type AuditCitationsRequestDetail = {
@@ -120,6 +130,12 @@ export type AuditCitationsRequestDetail = {
     category?: "statistic" | "finding" | "literature" | "empirical" | "consensus";
     requiresMultipleSources?: boolean;
     q1Guideline?: string;
+    paragraphIndex?: number;
+    existingCitationKeys?: string[];
+    partOfStudySummary?: boolean;
+    precedingText?: string;
+    sectionHeading?: string;
+    paragraphText?: string;
   }>;
 };
 

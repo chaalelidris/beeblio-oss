@@ -51,6 +51,11 @@ import {
   auditParagraphClaims,
   type UncitedClaim,
 } from "@/lib/claim-auditor";
+import {
+  calculateCitationPlacement,
+  checkParagraphCitationHygiene,
+  extractCitationsFromText,
+} from "@/lib/citation-placement";
 import { BIBLIOGRAPHY_MARKER, joinBibliographyMetadata, normalizeEscapedCitations, splitBibliographyMetadata } from "@/lib/markdown-bibliography";
 import { ensureBlankLineAfterTables } from "@/lib/markdown-repair";
 import { PROJECT_BIBLIOGRAPHY_PATH } from "@/lib/project-bibliography";
@@ -84,7 +89,7 @@ import {
 import {
   CitationContext, CitationNode, CitationDockHighlightExtension, DIAGRAM_EXTENSIONS, DiffAddition, DiffDeletion, Frontmatter, IMAGE_EXTENSIONS, ImportantCallout,
   MarkdownCodeBlock, MarkdownHeading, MarkdownParagraph, MarkdownSubscript, MarkdownSuperscript,
-  MarkdownTextStyle, MentionSearchHighlight, documentSelectionAt, fileExtension, isVisualFile, workspaceImage,
+  MarkdownTextStyle, MentionSearchHighlight, documentSelectionAt, expandRangeToWordBoundaries, fileExtension, isVisualFile, workspaceImage,
 } from "./tiptap-markdown-extensions";
 import { errorDetail } from "@/lib/error-detail";
 
@@ -467,7 +472,7 @@ export function MarkdownTiptapEditor({
     setMentionSearch(null);
   };
 
-  const appliedCitationsRef = useRef<Set<string>>(new Set());
+
   const activeCitationHighlightRef = useRef<CitationHighlightActiveDetail | null>(
     getActiveCitationHighlight(),
   );
@@ -477,28 +482,172 @@ export function MarkdownTiptapEditor({
     const current = editorRef.current;
     if (!current || current.isDestroyed) return;
 
-    const eventKey = `${detail.citationKey}:${detail.range.from}-${detail.range.to}`;
-    if (appliedCitationsRef.current.has(eventKey)) return;
-    appliedCitationsRef.current.add(eventKey);
-
     setPendingCitationToApply(null);
 
-    setReferences((prev) => {
-      if (!detail.reference || prev.some((r) => r.id === detail.citationKey)) return prev;
-      return [...prev, detail.reference];
+    const doc = current.state.doc;
+    const docSize = doc.content.size;
+
+    // 1. Locate the true position in the live document
+    // If earlier citations shifted positions, use text search to find the claim
+    let insertPos = typeof detail.range?.to === "number" ? detail.range.to : docSize;
+    const claimText = detail.text?.trim();
+
+    if (claimText && claimText.length > 5) {
+      let foundEnd: number | null = null;
+      doc.descendants((node, pos) => {
+        if (foundEnd !== null) return false;
+        if (node.isTextblock) {
+          const content = node.textContent;
+          const idx = content.indexOf(claimText);
+          if (idx >= 0) {
+            const endIdx = idx + claimText.length;
+            let charOffset = 0;
+            let childPos = pos + 1;
+            for (let i = 0; i < node.childCount; i++) {
+              const child = node.child(i);
+              const textLen = child.isText ? (child.text?.length ?? 0) : 0;
+              if (endIdx > charOffset && endIdx <= charOffset + textLen) {
+                foundEnd = childPos + (endIdx - charOffset);
+                break;
+              }
+              childPos += child.nodeSize;
+              charOffset += textLen;
+            }
+            if (foundEnd === null) {
+              foundEnd = pos + 1 + endIdx;
+            }
+            return false;
+          }
+        }
+      });
+      if (foundEnd !== null) {
+        insertPos = foundEnd;
+      }
+    }
+
+    insertPos = Math.max(0, Math.min(insertPos, docSize));
+
+    // 2. Academic duplicate prevention in the same paragraph:
+    // One source supports the entire paragraph -> avoid duplicate citations of the same paper
+    // unless this is a specific quantitative statistic or technical finding.
+    const $pos = doc.resolve(insertPos);
+    const textblock = $pos.parent;
+
+    if (!textblock.isTextblock) {
+      toast.error("Citations can only be added to standard document text.");
+      return;
+    }
+
+    const paragraphText = textblock.textContent;
+    const existingBlockKeys: string[] = [];
+    textblock.descendants((node) => {
+      if (node.type.name === "citation" && node.attrs.id) {
+        existingBlockKeys.push(node.attrs.id);
+      }
     });
+
+    const keysToInsert =
+      detail.citationKeys && detail.citationKeys.length > 0
+        ? detail.citationKeys
+        : [detail.citationKey];
+
+    // 2. Strict Academic Paragraph-Level Duplicate Guardrail:
+    // One source supports the entire paragraph -> avoid duplicate citations of the same paper
+    // unless this is a specific quantitative statistic or technical finding, or explicitly overridden.
+    for (const key of keysToInsert) {
+      const hygiene = checkParagraphCitationHygiene(
+        paragraphText,
+        key,
+        existingBlockKeys,
+        claimText,
+      );
+      if (
+        hygiene.isDuplicated &&
+        !hygiene.isExemptStatistic &&
+        !detail.overrideParagraphDuplicate
+      ) {
+        toast.info(
+          hygiene.guidance ||
+            `Already cited in this paragraph: @${key}. Academic best practice avoids redundant duplicate citations within the same paragraph.`,
+        );
+        return;
+      }
+    }
+
+    // 3. Publication-Grade Citation Placement:
+    // Enforces parenthetical placement before terminal punctuation (never after period),
+    // quotation protection, parenthetical clauses, word boundary preservation, and LaTeX formulas.
+    const startOfBlock = $pos.start();
+    const preferredEndCharIndex = Math.max(0, insertPos - startOfBlock);
+
+    const placement = calculateCitationPlacement(
+      paragraphText,
+      claimText || "",
+      preferredEndCharIndex,
+      keysToInsert,
+    );
+
+    // Map placement.insertIndex (character offset in textblock) to ProseMirror doc position
+    let blockCharOffset = 0;
+    let targetDocPos = startOfBlock;
+    for (let i = 0; i < textblock.childCount; i++) {
+      const child = textblock.child(i);
+      const textLen = child.isText ? (child.text?.length ?? 0) : 0;
+      if (placement.insertIndex <= blockCharOffset + textLen) {
+        targetDocPos += placement.insertIndex - blockCharOffset;
+        break;
+      }
+      targetDocPos += child.nodeSize;
+      blockCharOffset += textLen;
+    }
+    targetDocPos = Math.max(startOfBlock, Math.min(targetDocPos, $pos.end()));
+
+    // 4. Register references in document bibliography
+    setReferences((prev) => {
+      const newRefs = [...prev];
+      const refsToAdd =
+        detail.references && detail.references.length > 0
+          ? detail.references
+          : detail.reference
+            ? [detail.reference]
+            : [];
+      for (const ref of refsToAdd) {
+        if (ref && !newRefs.some((r) => r.id === ref.id)) {
+          newRefs.push(ref);
+        }
+      }
+      return newRefs;
+    });
+
+    // 5. Construct cleanly spaced citation nodes
+    const contentToInsert: any[] = [];
+    if (placement.needsLeadingSpace) {
+      contentToInsert.push({ type: "text", text: " " });
+    }
+    if (keysToInsert.length > 1) {
+      contentToInsert.push({
+        type: "citation",
+        attrs: { id: keysToInsert.join("; ") },
+      });
+    } else {
+      contentToInsert.push({
+        type: "citation",
+        attrs: { id: keysToInsert[0] },
+      });
+    }
+    if (placement.needsTrailingSpace) {
+      contentToInsert.push({ type: "text", text: " " });
+    }
 
     current
       .chain()
       .focus()
-      .setTextSelection(detail.range.to)
-      .insertContent([
-        { type: "text", text: " " },
-        { type: "citation", attrs: { id: detail.citationKey } },
-      ])
+      .setTextSelection(targetDocPos)
+      .insertContent(contentToInsert)
       .run();
 
-    toast.success(`Citation added: @${detail.citationKey}`);
+    const citedSummary = keysToInsert.map((k) => `@${k}`).join(", ");
+    toast.success(`Citation added: ${citedSummary}`);
   }, []);
 
   useEffect(() => {
@@ -513,15 +662,55 @@ export function MarkdownTiptapEditor({
   }, [applyFoundCitation]);
 
   const handleRequestFindCitation = (params: { from: number; to: number; text: string }) => {
-    const trimmed = params.text.trim();
-    if (!trimmed) return;
+    const current = editorRef.current;
+    if (!current) return;
+    const doc = current.state.doc;
+    const expanded = expandRangeToWordBoundaries(doc, params.from, params.to);
+    const cleanText = doc.textBetween(expanded.from, expanded.to, " ").trim();
+    if (!cleanText) return;
+
+    let existingCitationKeys: string[] = [];
+    let paragraphText = "";
+    let precedingText = "";
+    let succeedingText = "";
+    let sectionHeading = "";
+
+    const $pos = doc.resolve(expanded.from);
+    const parentBlock = $pos.parent;
+    if (parentBlock.isTextblock) {
+      paragraphText = parentBlock.textContent;
+      precedingText = doc.textBetween($pos.start(), expanded.from, " ").trim();
+      succeedingText = doc.textBetween(expanded.to, $pos.end(), " ").trim();
+      parentBlock.descendants((child) => {
+        if (child.type.name === "citation" && child.attrs.id) {
+          existingCitationKeys.push(child.attrs.id);
+        }
+      });
+      const textCitations = extractCitationsFromText(paragraphText);
+      existingCitationKeys = Array.from(
+        new Set([...existingCitationKeys, ...textCitations]),
+      );
+    }
+
+    // Resolve nearest preceding section heading
+    doc.nodesBetween(0, expanded.from, (node) => {
+      if (node.type.name === "heading") {
+        sectionHeading = node.textContent;
+      }
+    });
+
     window.dispatchEvent(
       new CustomEvent<FindCitationRequestDetail>(FIND_CITATION_REQUEST_EVENT, {
         detail: {
           projectId,
           draftFilePath: filePathRef.current,
-          text: trimmed,
-          range: { from: params.from, to: params.to },
+          text: cleanText,
+          range: { from: expanded.from, to: expanded.to },
+          existingCitationKeys,
+          precedingText: precedingText || undefined,
+          succeedingText: succeedingText || undefined,
+          sectionHeading: sectionHeading || undefined,
+          paragraphText: paragraphText || undefined,
         },
       }),
     );
@@ -1024,16 +1213,38 @@ export function MarkdownTiptapEditor({
   }, [editor]);
 
   useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+
+    const isSameFilePath = (a?: string | null, b?: string | null) => {
+      if (!a || !b) return true;
+      const cleanA = a.replace(/\\/g, "/").replace(/^[\/.]+/, "").trim();
+      const cleanB = b.replace(/\\/g, "/").replace(/^[\/.]+/, "").trim();
+      return cleanA === cleanB;
+    };
+
     const handleHighlightChange = (e: Event) => {
       const detail = (e as CustomEvent<CitationHighlightActiveDetail>).detail;
       if (!editor || editor.isDestroyed) return;
-      if (detail && detail.active && detail.filePath === filePathRef.current) {
+      if (detail && detail.active && isSameFilePath(detail.filePath, filePathRef.current)) {
         activeCitationHighlightRef.current = detail;
-      } else {
+        window.setTimeout(() => {
+          if (editor.isDestroyed) return;
+          const el = editor.view.dom.querySelector(".beeblio-citation-dock-highlight");
+          if (el instanceof HTMLElement) {
+            el.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        }, 40);
+      } else if (!detail || !detail.active) {
         activeCitationHighlightRef.current = null;
       }
       editor.view.dispatch(editor.state.tr);
     };
+
+    const initial = getActiveCitationHighlight();
+    if (initial && initial.active && isSameFilePath(initial.filePath, filePathRef.current)) {
+      activeCitationHighlightRef.current = initial;
+      editor.view.dispatch(editor.state.tr);
+    }
 
     window.addEventListener(CITATION_HIGHLIGHT_ACTIVE_EVENT, handleHighlightChange);
     return () => {
@@ -1041,14 +1252,29 @@ export function MarkdownTiptapEditor({
     };
   }, [editor]);
 
-  const handleAuditCitations = () => {
+  const handleAutoCiteClaims = () => {
     if (!editor) return;
     const claims: UncitedClaim[] = [];
 
+    let paragraphIndex = 0;
     // Traverse editor text blocks to find claims and accurate ProseMirror positions
     editor.state.doc.descendants((node, pos) => {
       if (node.isTextblock && (node.type.name === "paragraph" || node.type.name === "blockquote")) {
-        const paraText = node.textContent;
+        paragraphIndex++;
+        let paraText = "";
+        const existingCitationKeys: string[] = [];
+
+        for (let i = 0; i < node.childCount; i++) {
+          const child = node.child(i);
+          if (child.isText) {
+            paraText += child.text || "";
+          } else if (child.type.name === "citation") {
+            const key = child.attrs.id || "";
+            if (key) existingCitationKeys.push(key);
+            paraText += `[@${key || "cite"}]`;
+          }
+        }
+
         if (paraText.length < 32) return;
 
         const paraClaims = auditParagraphClaims(paraText, pos + 1);
@@ -1056,6 +1282,8 @@ export function MarkdownTiptapEditor({
           claims.push({
             ...c,
             id: `claim-${claims.length + 1}-${c.from}`,
+            paragraphIndex,
+            existingCitationKeys,
           });
         }
       }
@@ -1069,14 +1297,14 @@ export function MarkdownTiptapEditor({
     }
 
     if (claims.length === 0) {
-      toast.success("Citation audit clean!", {
+      toast.success("All claims cited!", {
         description: "No uncited empirical assertions or claims were detected in this document.",
       });
       return;
     }
 
     toast.info(`Found ${claims.length} uncited claim${claims.length > 1 ? "s" : ""}`, {
-      description: "Opening review queue to find matching citations in your knowledge base.",
+      description: "Opening citation assistant to match claims with your bibliography.",
     });
 
     try {
@@ -1265,7 +1493,7 @@ export function MarkdownTiptapEditor({
           onEditLink={openLinkDialog}
           citationStyle={citationStyle}
           onCitationStyleChange={(style) => { hasIndividualCitationStyleRef.current = true; setCitationStyle(style); emitMarkdown(bodyMarkdownRef.current, bibliographyTitle, style); }}
-          onAuditCitations={handleAuditCitations}
+          onAutoCiteClaims={handleAutoCiteClaims}
           showMarkdownMode
         />
       ) : null}

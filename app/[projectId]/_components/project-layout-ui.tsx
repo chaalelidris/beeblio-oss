@@ -86,10 +86,12 @@ import {
   type FindCitationRequestDetail,
   type AuditCitationsRequestDetail,
   type FocusDocumentRangeDetail,
+  type ApplyCitationDetail,
 } from "@/lib/chat-context";
 import { CitationReviewDock, type CitationApprovalState } from "./editors/citation-review-dock";
 import { findCitationForSelectionAction } from "../citation-finding-actions";
 import type { CitationFindMatch } from "@/lib/citation-finder";
+import { isSpecificStatisticClaim } from "@/lib/claim-auditor";
 import { OPEN_LITERATURE_SEARCH_EVENT, type OpenLiteratureSearchDetail } from "@/lib/literature/types";
 import { PROJECT_BIBLIOGRAPHY_PATH } from "@/lib/project-bibliography";
 import { isMarkdownFilePath } from "@/lib/project-settings";
@@ -265,6 +267,7 @@ export function ProjectLayoutUI({
   }, [openFiles, activeFilePath, previewFilePath]);
   const [draggedFilePath, setDraggedFilePath] = useState<string>();
   const [citationApprovalState, setCitationApprovalState] = useState<CitationApprovalState | null>(null);
+  const appliedParagraphCitationsRef = useRef<Map<number, Set<string>>>(new Map());
   const [selection, setSelection] = useState<WorkspaceSelection>();
   const [pendingConversationPath, setPendingConversationPath] = useState<string>();
   const [mobileAgentHeight, setMobileAgentHeight] = useState(0);
@@ -464,14 +467,39 @@ export function ProjectLayoutUI({
         text: detail.text,
         range: detail.range,
         draftFilePath: detail.draftFilePath,
+        paragraphText: detail.paragraphText,
+        existingCitationKeys: detail.existingCitationKeys,
         status: "searching",
       });
       try {
-        const res = await findCitationForSelectionAction(projectId, detail.text);
+        const res = await findCitationForSelectionAction(projectId, detail.text, {
+          precedingText: detail.precedingText,
+          succeedingText: detail.succeedingText,
+          sectionHeading: detail.sectionHeading,
+          paragraphText: detail.paragraphText,
+        });
         if (res.found) {
-          setCitationApprovalState((prev) =>
-            prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
-          );
+          const isSameInBlock = detail.existingCitationKeys?.includes(res.match.citationKey);
+          const isStat = isSpecificStatisticClaim(detail.text);
+
+          if (isSameInBlock && !isStat) {
+            setCitationApprovalState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "already_cited",
+                    match: res.match,
+                    matches: res.matches,
+                    alreadyCitedInParagraph: true,
+                    alreadyCitedKey: res.match?.citationKey,
+                  }
+                : null,
+            );
+          } else {
+            setCitationApprovalState((prev) =>
+              prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+            );
+          }
         } else {
           setCitationApprovalState((prev) =>
             prev ? { ...prev, status: "not_found", error: res.message } : null,
@@ -498,12 +526,24 @@ export function ProjectLayoutUI({
       const detail = (event as CustomEvent<AuditCitationsRequestDetail>).detail;
       if (!detail || !detail.claims || detail.claims.length === 0) return;
 
+      // Seed session paragraph citation map from existing citations in the document
+      appliedParagraphCitationsRef.current = new Map();
+      detail.claims.forEach((c) => {
+        if (c.paragraphIndex !== undefined && c.existingCitationKeys && c.existingCitationKeys.length > 0) {
+          const set = appliedParagraphCitationsRef.current.get(c.paragraphIndex) || new Set();
+          c.existingCitationKeys.forEach((k) => set.add(k));
+          appliedParagraphCitationsRef.current.set(c.paragraphIndex, set);
+        }
+      });
+
       const firstClaim = detail.claims[0];
       setCitationApprovalState({
         isOpen: true,
         draftFilePath: detail.draftFilePath,
         text: firstClaim.text,
         range: { from: firstClaim.from, to: firstClaim.to },
+        paragraphText: firstClaim.paragraphText,
+        existingCitationKeys: firstClaim.existingCitationKeys,
         status: "searching",
         auditQueue: {
           claims: detail.claims,
@@ -514,11 +554,37 @@ export function ProjectLayoutUI({
       });
 
       try {
-        const res = await findCitationForSelectionAction(projectId, firstClaim.text);
+        const res = await findCitationForSelectionAction(projectId, firstClaim.text, {
+          precedingText: firstClaim.precedingText,
+          sectionHeading: firstClaim.sectionHeading,
+          paragraphText: firstClaim.paragraphText,
+        });
         if (res.found) {
-          setCitationApprovalState((prev) =>
-            prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
-          );
+          const paraIdx = firstClaim.paragraphIndex;
+          const paraCitations = paraIdx !== undefined ? appliedParagraphCitationsRef.current.get(paraIdx) : null;
+          const alreadyInPara =
+            paraCitations?.has(res.match.citationKey) ||
+            firstClaim.existingCitationKeys?.includes(res.match.citationKey);
+          const isStat = firstClaim.category === "statistic" || isSpecificStatisticClaim(firstClaim.text);
+
+          if (alreadyInPara && !isStat) {
+            setCitationApprovalState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "already_cited",
+                    match: res.match,
+                    matches: res.matches,
+                    alreadyCitedInParagraph: true,
+                    alreadyCitedKey: res.match?.citationKey,
+                  }
+                : null,
+            );
+          } else {
+            setCitationApprovalState((prev) =>
+              prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+            );
+          }
         } else {
           setCitationApprovalState((prev) =>
             prev ? { ...prev, status: "not_found", error: res.message } : null,
@@ -587,6 +653,8 @@ export function ProjectLayoutUI({
       draftFilePath: current.draftFilePath,
       text: nextClaim.text,
       range: { from: nextClaim.from, to: nextClaim.to },
+      paragraphText: nextClaim.paragraphText,
+      existingCitationKeys: nextClaim.existingCitationKeys,
       status: "searching",
       auditQueue: {
         claims,
@@ -597,11 +665,37 @@ export function ProjectLayoutUI({
     });
 
     try {
-      const res = await findCitationForSelectionAction(projectId, nextClaim.text);
+      const res = await findCitationForSelectionAction(projectId, nextClaim.text, {
+        precedingText: nextClaim.precedingText,
+        sectionHeading: nextClaim.sectionHeading,
+        paragraphText: nextClaim.paragraphText,
+      });
       if (res.found) {
-        setCitationApprovalState((prev) =>
-          prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
-        );
+        const paraIdx = nextClaim.paragraphIndex;
+        const paraCitations = paraIdx !== undefined ? appliedParagraphCitationsRef.current.get(paraIdx) : null;
+        const alreadyInPara =
+          paraCitations?.has(res.match.citationKey) ||
+          nextClaim.existingCitationKeys?.includes(res.match.citationKey);
+        const isStat = nextClaim.category === "statistic" || isSpecificStatisticClaim(nextClaim.text);
+
+        if (alreadyInPara && !isStat) {
+          setCitationApprovalState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  status: "already_cited",
+                  match: res.match,
+                  matches: res.matches,
+                  alreadyCitedInParagraph: true,
+                  alreadyCitedKey: res.match?.citationKey,
+                }
+              : null,
+          );
+        } else {
+          setCitationApprovalState((prev) =>
+            prev ? { ...prev, status: "found", match: res.match, matches: res.matches } : null,
+          );
+        }
       } else {
         setCitationApprovalState((prev) =>
           prev ? { ...prev, status: "not_found", error: res.message } : null,
@@ -633,12 +727,27 @@ export function ProjectLayoutUI({
     match: CitationFindMatch,
     range: { from: number; to: number },
     draftFilePath: string,
+    options?: {
+      selectedMatches?: CitationFindMatch[];
+      overrideParagraphDuplicate?: boolean;
+    },
   ) => {
-    const detail = {
+    const selected =
+      options?.selectedMatches && options.selectedMatches.length > 0
+        ? options.selectedMatches
+        : [match];
+    const keys = selected.map((m) => m.citationKey);
+    const refs = selected.map((m) => m.reference).filter(Boolean);
+
+    const detail: ApplyCitationDetail = {
       filePath: draftFilePath,
       range,
-      citationKey: match.citationKey,
+      citationKey: keys.join("; "),
+      citationKeys: keys,
       reference: match.reference,
+      references: refs,
+      text: citationApprovalState?.text,
+      overrideParagraphDuplicate: options?.overrideParagraphDuplicate,
     };
     setPendingCitationToApply(detail);
     if (activeFilePath !== draftFilePath) {
@@ -649,6 +758,22 @@ export function ProjectLayoutUI({
     );
 
     if (citationApprovalState?.auditQueue) {
+      const currentClaim =
+        citationApprovalState.auditQueue.claims[
+          citationApprovalState.auditQueue.currentIndex
+        ];
+      if (currentClaim?.paragraphIndex !== undefined) {
+        const set =
+          appliedParagraphCitationsRef.current.get(
+            currentClaim.paragraphIndex,
+          ) || new Set();
+        keys.forEach((k) => set.add(k));
+        appliedParagraphCitationsRef.current.set(
+          currentClaim.paragraphIndex,
+          set,
+        );
+      }
+
       void handleNavigateAuditClaim(
         citationApprovalState.auditQueue.currentIndex + 1,
         1,

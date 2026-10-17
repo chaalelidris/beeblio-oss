@@ -1,16 +1,32 @@
-// The app imports TypeScript modules without extensions, as its bundlers
-// allow. Node's built-in TypeScript support needs the extension, so tests load
-// this hook (see "test" in package.json) to retry such imports with ".ts".
 import { registerHooks } from "node:module";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    let target = specifier;
+    if (target.startsWith("@/")) {
+      target = pathToFileURL(path.join(rootDir, target.slice(2))).href;
+    }
     try {
-      return nextResolve(specifier, context);
+      return nextResolve(target, context);
     } catch (error) {
-      const relative = specifier.startsWith("./") || specifier.startsWith("../");
-      if (error?.code !== "ERR_MODULE_NOT_FOUND" || !relative || /\.[cm]?[jt]sx?$/.test(specifier)) throw error;
-      return nextResolve(`${specifier}.ts`, context);
+      if (error?.code !== "ERR_MODULE_NOT_FOUND" && error?.code !== "ERR_UNSUPPORTED_DIR_IMPORT") throw error;
+      try {
+        return nextResolve(`${target}.ts`, context);
+      } catch {
+        try {
+          return nextResolve(`${target}/index.ts`, context);
+        } catch {
+          try {
+            return nextResolve(`${target}.tsx`, context);
+          } catch {
+            throw error;
+          }
+        }
+      }
     }
   },
 });

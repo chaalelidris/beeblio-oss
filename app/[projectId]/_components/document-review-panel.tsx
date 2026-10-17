@@ -3,10 +3,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   BookCheck, Check, CheckCheck, Circle, FileSearch, FileUp, Loader2, MessageSquareQuote,
-  PenLine, ShieldCheck, X, GraduationCap, FlaskConical, Leaf, Info, OctagonAlert, TriangleAlert, ChevronLeft, ChevronDown, ChevronUp
+  PenLine, ShieldCheck, X, GraduationCap, FlaskConical, Leaf, Info, OctagonAlert, TriangleAlert, ChevronLeft, ChevronDown, ChevronUp, Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
+import {
+  FIND_CITATION_REQUEST_EVENT,
+  APPLY_CITATION_EVENT,
+  type FindCitationRequestDetail,
+  type ApplyCitationDetail,
+} from "@/lib/chat-context";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -168,6 +174,49 @@ export function DocumentReviewPanel({ projectId, filePath, content }: {
     toast.message("Finding rejected", { description: "It is ignored for this review and the document is unchanged." });
   };
 
+  useEffect(() => {
+    const handleCitationApplied = (event: Event) => {
+      const detail = (event as CustomEvent<ApplyCitationDetail>).detail;
+      if (!detail || detail.filePath !== filePath) return;
+      setDismissed((prev) => {
+        const next = new Set(prev);
+        result?.findings.forEach((finding) => {
+          if (
+            (detail.text && (finding.quote.includes(detail.text) || detail.text.includes(finding.quote))) ||
+            (detail.range && content && content.slice(detail.range.from, detail.range.to).includes(finding.quote))
+          ) {
+            next.add(finding.id);
+          }
+        });
+        return next;
+      });
+      toast.success("Citation added", { description: "Unverified claim finding resolved." });
+    };
+    window.addEventListener(APPLY_CITATION_EVENT, handleCitationApplied);
+    return () => window.removeEventListener(APPLY_CITATION_EVENT, handleCitationApplied);
+  }, [filePath, result, content]);
+
+  const handleFindCitation = (finding: ReviewFinding) => {
+    if (!filePath || !content) return;
+    openAnchor(finding);
+
+    const quoteIdx = content.indexOf(finding.quote);
+    const range = quoteIdx >= 0
+      ? { from: quoteIdx, to: quoteIdx + finding.quote.length }
+      : { from: 0, to: finding.quote.length };
+
+    window.dispatchEvent(
+      new CustomEvent<FindCitationRequestDetail>(FIND_CITATION_REQUEST_EVENT, {
+        detail: {
+          projectId,
+          draftFilePath: filePath,
+          text: finding.quote.trim(),
+          range,
+        },
+      }),
+    );
+  };
+
   if (!selected) return <div className="flex h-full min-h-0 flex-col">
     <div className="flex h-10 shrink-0 items-center border-b px-3">
       <p className="text-xs font-medium text-muted-foreground">Choose a focused reviewer. Changes require your approval.</p>
@@ -235,7 +284,7 @@ export function DocumentReviewPanel({ projectId, filePath, content }: {
         {acceptedFindings.length || dismissed.size ? <p className="text-center text-[11px] text-muted-foreground">{acceptedFindings.length} Accepted · {dismissed.size} Rejected · {pendingFindings.length} Pending</p> : null}
         <div className="space-y-2">{findings.map((finding) => {
           const accepted = reviewed.has(finding.id);
-          return <FindingCard key={finding.id} finding={finding} reviewed={accepted} onDismiss={() => rejectFinding(finding)} onOpen={() => accepted || !isProposedEdit(finding) ? openAnchor(finding) : propose([finding], "stage")} onUnstage={() => setReviewed((current) => { const next = new Set(current); next.delete(finding.id); return next; })} />;
+          return <FindingCard key={finding.id} finding={finding} reviewed={accepted} onDismiss={() => rejectFinding(finding)} onOpen={() => accepted || !isProposedEdit(finding) ? openAnchor(finding) : propose([finding], "stage")} onUnstage={() => setReviewed((current) => { const next = new Set(current); next.delete(finding.id); return next; })} onFindCitation={() => handleFindCitation(finding)} />;
         })}</div>
         {!findings.length && !result.error ? <p className="py-8 text-center text-xs text-muted-foreground">No actionable issues found.</p> : null}
       </> : null}
@@ -260,15 +309,38 @@ function ReviewProgress({ type, activeStep, running }: { type: ReviewType; activ
   </div>;
 }
 
-function FindingCard({ finding, reviewed, onDismiss, onOpen, onUnstage }: { finding: ReviewFinding; reviewed: boolean; onDismiss: () => void; onOpen: () => void; onUnstage: () => void }) {
+function FindingCard({ finding, reviewed, onDismiss, onOpen, onUnstage, onFindCitation }: { finding: ReviewFinding; reviewed: boolean; onDismiss: () => void; onOpen: () => void; onUnstage: () => void; onFindCitation?: () => void }) {
   const edit = isProposedEdit(finding);
+  const isCitationIssue =
+    finding.category === "source_support" ||
+    finding.category === "citation_needed" ||
+    finding.category === "unsupported_claim" ||
+    finding.message.toLowerCase().includes("citation") ||
+    finding.message.toLowerCase().includes("source support");
+
   return <article role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(); } }} className={cn("cursor-pointer rounded-xl border bg-card p-3 transition-colors hover:border-primary/35 hover:bg-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", reviewed && "border-emerald-500/25 bg-emerald-500/[0.03]")}>
     <div className="flex items-center gap-2"><SeverityIcon severity={finding.severity} /><span className="min-w-0 flex-1 text-[11px] font-medium leading-6 text-muted-foreground">{finding.category}</span><button type="button" title="Reject this finding" onClick={(event) => { event.stopPropagation(); onDismiss(); }} aria-label="Reject this finding" className="flex size-6 items-center justify-center text-muted-foreground hover:text-foreground"><X className="size-3.5" /></button></div>
     <div className="mt-2 line-clamp-4 border-l-2 border-primary/30 pl-2 text-xs leading-5 text-muted-foreground"><ReviewMarkdown>{finding.quote}</ReviewMarkdown></div>
     <p className="mt-2 text-xs leading-5">{finding.message}</p>
     {edit ? <div className="mt-2 rounded-lg bg-emerald-500/7 p-2 text-xs leading-5"><p className="mb-1 font-medium text-emerald-700 dark:text-emerald-400">Suggestion</p><ReviewMarkdown>{finding.replacement!}</ReviewMarkdown></div> : null}
-    <div className="mt-2 flex items-center justify-between gap-2">
-      {/* <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{edit ? "Click card to review edit" : "Comment · click to locate passage"}</span> */}
+    <div className="mt-2.5 flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
+      {isCitationIssue ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          className="h-6 gap-1 px-2 text-[11px] border-primary/30 text-primary hover:bg-primary/10 shadow-2xs"
+          onClick={(event) => {
+            event.stopPropagation();
+            onFindCitation?.();
+          }}
+          title="Search your project bibliography to support this statement"
+        >
+          <Sparkles className="size-3" />
+          Find in Bibliography
+        </Button>
+      ) : <div />}
+
       {edit && reviewed ? <Button size="xs" variant="outline" onClick={(event) => { event.stopPropagation(); onUnstage(); }}>
         <CheckCheck />Accepted · Undo</Button> : null}
     </div>

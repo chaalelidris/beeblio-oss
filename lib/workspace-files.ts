@@ -9,7 +9,14 @@ export type WorkspaceFileEntry = { name: string; path: string; isDir: boolean; s
 export type WorkspaceRootTree = { entries: WorkspaceFileEntry[]; children: Record<string, WorkspaceFileEntry[]> };
 export type StorageUsage = { usedBytes: number; quotaBytes: number | null };
 export class WorkspaceFileError extends Error {
-  constructor(message: string, readonly status: number, readonly code: string) { super(message); this.name = "WorkspaceFileError"; }
+  status: number;
+  code: string;
+  constructor(message: string, status: number, code: string) {
+    super(message);
+    this.name = "WorkspaceFileError";
+    this.status = status;
+    this.code = code;
+  }
 }
 export { WorkspaceFileError as AgentWorkspaceError };
 export const WORKSPACE_MARKER_FILENAME = ".bee-workspace.json";

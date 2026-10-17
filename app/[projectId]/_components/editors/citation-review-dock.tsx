@@ -27,6 +27,10 @@ import {
 } from "lucide-react";
 import type { CitationFindMatch } from "@/lib/citation-finder";
 import { OPEN_WORKSPACE_FILE_EVENT } from "@/lib/chat-context";
+import {
+  calculateCitationPlacement,
+  checkParagraphCitationHygiene,
+} from "@/lib/citation-placement";
 import { cn } from "@/lib/utils";
 
 export const SCANNING_STEPS = [
@@ -35,35 +39,35 @@ export const SCANNING_STEPS = [
     title: "Reading project bibliography (references.bib)",
     detail: "Parsing entries, abstracts, and metadata in references.bib",
     short: "Reading bibliography…",
-    durationMs: 900,
+    durationMs: 800,
   },
   {
-    id: "keywords",
-    title: "Extracting key terms & factual claims",
-    detail: "Analyzing empirical keywords, entities, and claim patterns",
-    short: "Analyzing keywords…",
-    durationMs: 1400,
+    id: "claim",
+    title: "Stage A: Scientific Claim Decomposition",
+    detail: "Extracting main claim, subclaims, metrics, units, and causal markers",
+    short: "Decomposing claim…",
+    durationMs: 1200,
   },
   {
-    id: "pdfs",
-    title: "Scanning linked PDF papers",
-    detail: "Extracting paragraphs and tables page by page with PDF worker",
-    short: "Scanning PDFs…",
-    durationMs: 3200,
-  },
-  {
-    id: "kb",
-    title: "Querying knowledge base index",
-    detail: "Searching vector chunks and semantic reference excerpts",
-    short: "Matching knowledge base…",
+    id: "retrieval",
+    title: "Stage B: Evidence Passage Retrieval",
+    detail: "Scanning PDFs, abstracts, and vector chunks preserving provenance",
+    short: "Retrieving passages…",
     durationMs: 2500,
   },
   {
-    id: "scoring",
-    title: "Evaluating evidence & scoring",
-    detail: "Verifying claim support and extracting exact quotations",
-    short: "Scoring matches…",
-    durationMs: 6000,
+    id: "rerank",
+    title: "Stage C & E: Alignment & Consistency Checks",
+    detail: "Validating numerical metrics, polarity, units, and reranking passages",
+    short: "Checking consistency…",
+    durationMs: 2000,
+  },
+  {
+    id: "verification",
+    title: "Stage D & F: Claim–Evidence Entailment Verification",
+    detail: "Evaluating factual entailment, supported subclaims, and decision",
+    short: "Verifying evidence…",
+    durationMs: 3500,
   },
 ] as const;
 
@@ -72,10 +76,14 @@ export type CitationApprovalState = {
   text: string;
   range: { from: number; to: number };
   draftFilePath: string;
-  status: "searching" | "found" | "not_found" | "error";
+  paragraphText?: string;
+  existingCitationKeys?: string[];
+  status: "searching" | "found" | "not_found" | "already_cited" | "error";
   match?: CitationFindMatch;
   matches?: CitationFindMatch[];
   error?: string;
+  alreadyCitedInParagraph?: boolean;
+  alreadyCitedKey?: string;
   auditQueue?: {
     claims: Array<{
       id: string;
@@ -86,6 +94,12 @@ export type CitationApprovalState = {
       category?: "statistic" | "finding" | "literature" | "empirical" | "consensus";
       requiresMultipleSources?: boolean;
       q1Guideline?: string;
+      paragraphIndex?: number;
+      existingCitationKeys?: string[];
+      partOfStudySummary?: boolean;
+      precedingText?: string;
+      sectionHeading?: string;
+      paragraphText?: string;
     }>;
     currentIndex: number;
     approvedCount: number;
@@ -374,13 +388,22 @@ export function CitationReviewDock({
 }: {
   state: CitationApprovalState | null;
   onClose: () => void;
-  onApprove: (match: CitationFindMatch, range: { from: number; to: number }, draftFilePath: string) => void;
+  onApprove: (
+    match: CitationFindMatch,
+    range: { from: number; to: number },
+    draftFilePath: string,
+    options?: {
+      selectedMatches?: CitationFindMatch[];
+      overrideParagraphDuplicate?: boolean;
+    },
+  ) => void;
   onReject: () => void;
   onSkipClaim?: () => void;
   onNavigateClaim?: (index: number) => void;
 }) {
   const [minimized, setMinimized] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedMatchKeys, setSelectedMatchKeys] = useState<Set<string>>(new Set());
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -551,6 +574,7 @@ export function CitationReviewDock({
 
   useEffect(() => {
     setSelectedIndex(0);
+    setSelectedMatchKeys(new Set());
   }, [state?.text]);
 
   if (!state || !state.isOpen) return null;
@@ -563,6 +587,32 @@ export function CitationReviewDock({
         ? [state.match]
         : [];
   const activeMatch = matches[selectedIndex] ?? matches[0] ?? state.match;
+
+  const effectiveSelectedMatches = matches.filter((m) =>
+    selectedMatchKeys.has(m.citationKey),
+  );
+  const activeKeys =
+    effectiveSelectedMatches.length > 0
+      ? effectiveSelectedMatches.map((m) => m.citationKey)
+      : activeMatch
+        ? [activeMatch.citationKey]
+        : [];
+
+  const placement = calculateCitationPlacement(
+    state.paragraphText || state.text,
+    state.text,
+    undefined,
+    activeKeys,
+  );
+
+  const activeHygiene = activeMatch
+    ? checkParagraphCitationHygiene(
+        state.paragraphText || state.text,
+        activeMatch.citationKey,
+        state.existingCitationKeys,
+        state.text,
+      )
+    : null;
 
   const handleOpenSourceForMatch = (m: CitationFindMatch) => {
     if (!m.sourceFilePath) return;
@@ -638,18 +688,20 @@ export function CitationReviewDock({
         )}
         <span className="text-xs font-semibold text-foreground pointer-events-none select-none truncate max-w-[280px]">
           {isCompleted
-            ? `Audit Complete (${state.auditQueue?.approvedCount ?? 0} cited)`
+            ? `Review Complete (${state.auditQueue?.approvedCount ?? 0} cited)`
             : isAudit
               ? status === "searching"
-                ? `Audit (${(state.auditQueue?.currentIndex ?? 0) + 1}/${state.auditQueue?.claims.length}) · ${SCANNING_STEPS[currentStepIndex]?.short}`
-                : `Audit (${(state.auditQueue?.currentIndex ?? 0) + 1}/${state.auditQueue?.claims.length})`
+                ? `Auto-Cite (${(state.auditQueue?.currentIndex ?? 0) + 1}/${state.auditQueue?.claims.length}) · ${SCANNING_STEPS[currentStepIndex]?.short}`
+                : `Auto-Cite (${(state.auditQueue?.currentIndex ?? 0) + 1}/${state.auditQueue?.claims.length})`
               : status === "searching"
                 ? (SCANNING_STEPS[currentStepIndex]?.short || "Searching citations…")
-                : status === "found" && activeMatch
-                  ? `${matches.length > 1 ? `${matches.length} matches · ` : ""}Top: @${activeMatch.citationKey} (${activeMatch.score}%)`
-                  : status === "not_found"
-                    ? "No citations found"
-                    : "Citation search error"}
+                : status === "already_cited"
+                  ? `Already cited in paragraph (@${state.alreadyCitedKey || activeMatch?.citationKey})`
+                  : status === "found" && activeMatch
+                    ? `${matches.length > 1 ? `${matches.length} matches · ` : ""}Top: @${activeMatch.citationKey} (${activeMatch.score}%)`
+                    : status === "not_found"
+                      ? "No citations found"
+                      : "Citation search error"}
         </span>
         {status === "found" && activeMatch?.sourceFilePath && !isCompleted ? (
           <Button
@@ -758,11 +810,11 @@ export function CitationReviewDock({
           </div>
           <span className="truncate text-xs font-semibold text-foreground">
             {isCompleted
-              ? "Citation Audit Complete"
+              ? "All Claims Reviewed"
               : isAudit && auditQueue
                 ? status === "searching"
-                  ? `Audit Mode · Claim ${auditQueue.currentIndex + 1}/${auditQueue.claims.length} (${SCANNING_STEPS[currentStepIndex]?.short})`
-                  : `Audit Mode · Claim ${auditQueue.currentIndex + 1} of ${auditQueue.claims.length}`
+                  ? `Auto-Cite · Claim ${auditQueue.currentIndex + 1}/${auditQueue.claims.length} (${SCANNING_STEPS[currentStepIndex]?.short})`
+                  : `Auto-Cite · Claim ${auditQueue.currentIndex + 1} of ${auditQueue.claims.length}`
                 : status === "searching"
                   ? (SCANNING_STEPS[currentStepIndex]?.title || "Searching Bibliography Knowledge Base")
                   : status === "found"
@@ -850,6 +902,11 @@ export function CitationReviewDock({
                   {currentClaim.signal}
                 </Badge>
               )}
+              {status === "already_cited" && (
+                <Badge variant="outline" className="text-[10px] border-blue-500/40 text-blue-600 dark:text-blue-400 bg-blue-500/10 px-1.5 py-0">
+                  Already supported in paragraph
+                </Badge>
+              )}
               {currentClaim?.requiresMultipleSources && (
                 <Badge variant="outline" className="text-[10px] border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10 px-1.5 py-0">
                   Multiple sources needed
@@ -887,7 +944,7 @@ export function CitationReviewDock({
               <CheckCircle2 className="size-8" />
             </div>
             <div className="space-y-1">
-              <h4 className="text-sm font-semibold text-foreground">Citation Audit Complete!</h4>
+              <h4 className="text-sm font-semibold text-foreground">All Claims Reviewed!</h4>
               <p className="text-xs text-muted-foreground max-w-xs">
                 All {auditQueue.claims.length} empirical claims in this document have been reviewed against your bibliography.
               </p>
@@ -1026,12 +1083,8 @@ export function CitationReviewDock({
             <div className="space-y-2">
               {matches.map((m, idx) => {
                 const isSelected = idx === selectedIndex;
-                const scoreColor =
-                  m.score >= 80
-                    ? "bg-emerald-600 dark:bg-emerald-500"
-                    : m.score >= 60
-                      ? "bg-blue-600 dark:bg-blue-500"
-                      : "bg-amber-600 dark:bg-amber-500";
+                const rec = m.recommendation || (m.score >= 80 ? "RECOMMEND" : m.score >= 60 ? "PARTIAL_SUPPORT" : "NEEDS_REVIEW");
+                const verificationLabel = m.verificationLabel;
 
                 return (
                   <div
@@ -1049,21 +1102,87 @@ export function CitationReviewDock({
                         : "border-border/80 bg-card/60 hover:bg-muted/40 hover:border-primary/40",
                     )}
                   >
-                    {/* Top Row: Score Badge, Citation Key, Location & Check Source Button */}
+                    {/* Top Row: Multi-select Checkbox, Recommendation Badge, Citation Key, Location & Check Source Button */}
                     <div className="flex items-center justify-between gap-1.5 flex-wrap">
                       <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                        <span className={cn(
-                          "inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[10px] font-bold font-mono text-white",
-                          scoreColor,
-                        )}>
-                          {m.score}% Match
-                        </span>
+                        {matches.length > 1 && (
+                          <input
+                            type="checkbox"
+                            checked={selectedMatchKeys.has(m.citationKey)}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              setSelectedMatchKeys((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(m.citationKey)) {
+                                  next.delete(m.citationKey);
+                                } else {
+                                  next.add(m.citationKey);
+                                }
+                                return next;
+                              });
+                            }}
+                            className="size-3.5 rounded border-muted-foreground/40 accent-primary cursor-pointer shrink-0"
+                            title="Select to bundle this citation into co-citation group"
+                          />
+                        )}
+
+                        {rec === "RECOMMEND" && (
+                          <Badge className="bg-emerald-600 text-white hover:bg-emerald-600 font-semibold text-[10px] gap-1 px-1.5 py-0.5">
+                            <CheckCircle2 className="size-3" /> RECOMMEND
+                          </Badge>
+                        )}
+                        {rec === "PARTIAL_SUPPORT" && (
+                          <Badge className="bg-amber-600 text-white hover:bg-amber-600 font-semibold text-[10px] gap-1 px-1.5 py-0.5">
+                            <AlertTriangle className="size-3" /> PARTIAL SUPPORT
+                          </Badge>
+                        )}
+                        {rec === "NEEDS_REVIEW" && (
+                          <Badge className="bg-purple-600 text-white hover:bg-purple-600 font-semibold text-[10px] gap-1 px-1.5 py-0.5">
+                            <FileSearch className="size-3" /> NEEDS REVIEW
+                          </Badge>
+                        )}
+                        {rec === "REJECT" && (
+                          <Badge className="bg-destructive text-destructive-foreground hover:bg-destructive font-semibold text-[10px] gap-1 px-1.5 py-0.5">
+                            <X className="size-3" /> REJECT
+                          </Badge>
+                        )}
+
                         <Badge variant="outline" className="border-primary/40 px-1.5 py-0 text-[10px] font-mono text-primary font-semibold">
                           @{m.citationKey}
                         </Badge>
                         <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
                           {m.sourceLocation}
                         </Badge>
+
+                        {(() => {
+                          const itemHygiene = checkParagraphCitationHygiene(
+                            state.paragraphText || state.text,
+                            m.citationKey,
+                            state.existingCitationKeys,
+                            state.text,
+                          );
+                          return itemHygiene.isDuplicated ? (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-500/10 px-1.5 py-0 text-[10px]"
+                            >
+                              Already in Paragraph
+                            </Badge>
+                          ) : null;
+                        })()}
+
+                        {m.isSecondaryCitation && (
+                          <Badge variant="outline" className="border-amber-500/40 text-amber-600 bg-amber-500/10 px-1.5 py-0 text-[10px]">
+                            Secondary Source
+                          </Badge>
+                        )}
+
+                        {/* Distinct Relevance vs Entailment Display */}
+                        {m.retrievalScore !== undefined && (
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            Relevance: {m.retrievalScore}%
+                          </span>
+                        )}
                       </div>
 
                       {m.sourceFilePath ? (
@@ -1099,30 +1218,154 @@ export function CitationReviewDock({
                       </p>
                     </div>
 
+                    {/* Evidence Verification Label if available */}
+                    {verificationLabel && (
+                      <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-medium text-muted-foreground">Evidence Status:</span>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "text-[10px] px-1.5 py-0 font-medium",
+                            verificationLabel === "SUPPORTED" && "border-emerald-500/40 text-emerald-600 bg-emerald-500/10",
+                            verificationLabel === "PARTIALLY_SUPPORTED" && "border-amber-500/40 text-amber-600 bg-amber-500/10",
+                            verificationLabel === "RELATED_BUT_UNSUPPORTED" && "border-orange-500/40 text-orange-600 bg-orange-500/10",
+                            verificationLabel === "CONTRADICTED" && "border-red-500/40 text-red-600 bg-red-500/10",
+                            verificationLabel === "INSUFFICIENT_CONTEXT" && "border-zinc-500/40 text-zinc-600 bg-zinc-500/10",
+                          )}
+                        >
+                          {verificationLabel.replace(/_/g, " ")}
+                        </Badge>
+                      </div>
+                    )}
+
                     {/* Details if Selected vs Snippet if Unselected */}
                     {isSelected ? (
                       <div className="mt-2.5 pt-2 border-t border-primary/15 space-y-2">
                         <div className="rounded-md border border-primary/20 bg-background/85 p-2 text-xs">
                           <div className="flex items-center gap-1 text-[10px] font-semibold text-primary mb-1">
                             <Quote className="size-3" />
-                            <span>Original text in source ({m.sourceLocation}):</span>
+                            <span>Evidence excerpt in source ({m.sourceLocation}):</span>
                           </div>
                           <p className="italic leading-relaxed text-foreground/95">
-                            "{m.originalText}"
+                            "{m.evidenceExcerpt || m.originalText}"
                           </p>
                         </div>
+
+                        {/* Subclaims breakdown if available */}
+                        {m.supportedSubclaims && m.supportedSubclaims.length > 0 && (
+                          <div className="space-y-0.5 rounded-md bg-emerald-500/5 border border-emerald-500/20 p-2 text-xs">
+                            <span className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
+                              ✓ Supported Subclaims:
+                            </span>
+                            {m.supportedSubclaims.map((sub, sIdx) => (
+                              <p key={sIdx} className="text-[11px] text-foreground/90 pl-2">
+                                • {sub}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                        {m.unsupportedSubclaims && m.unsupportedSubclaims.length > 0 && (
+                          <div className="space-y-0.5 rounded-md bg-amber-500/5 border border-amber-500/20 p-2 text-xs">
+                            <span className="text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                              ⚠ Unsupported Subclaims (Needs additional source):
+                            </span>
+                            {m.unsupportedSubclaims.map((sub, sIdx) => (
+                              <p key={sIdx} className="text-[11px] text-amber-900/90 dark:text-amber-200/90 pl-2">
+                                • {sub}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                        {m.contradictedSubclaims && m.contradictedSubclaims.length > 0 && (
+                          <div className="space-y-0.5 rounded-md bg-red-500/10 border border-red-500/30 p-2 text-xs">
+                            <span className="text-[10px] font-semibold text-destructive">
+                              ✕ Contradicted Claims:
+                            </span>
+                            {m.contradictedSubclaims.map((sub, sIdx) => (
+                              <p key={sIdx} className="text-[11px] text-destructive pl-2">
+                                • {sub}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                        {m.discrepancies && m.discrepancies.length > 0 && (
+                          <div className="space-y-0.5 rounded-md bg-amber-500/10 border border-amber-500/30 p-2 text-xs">
+                            <span className="text-[10px] font-semibold text-amber-800 dark:text-amber-300">
+                              Discrepancy Flags:
+                            </span>
+                            {m.discrepancies.map((disc, dIdx) => (
+                              <p key={dIdx} className="text-[11px] text-amber-900 dark:text-amber-200 pl-2">
+                                ⚠ {disc}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
                         <p className="text-[11px] text-muted-foreground leading-normal">
-                          <span className="font-medium text-foreground">Why it matches:</span> {m.explanation}
+                          <span className="font-medium text-foreground">Recommendation rationale:</span>{" "}
+                          {m.reasoning || m.explanation}
                         </p>
                       </div>
                     ) : (
                       <p className="mt-1 text-[11px] italic text-muted-foreground line-clamp-1">
-                        "{m.originalText}"
+                        "{m.evidenceExcerpt || m.originalText}"
                       </p>
                     )}
                   </div>
                 );
               })}
+            </div>
+
+            {/* Academic In-Text Placement Preview */}
+            <div className="rounded-md border border-border/80 bg-muted/30 p-2.5 text-xs space-y-1 mt-2">
+              <div className="flex items-center justify-between text-[10px] font-semibold text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <Quote className="size-3 text-primary" /> In-Text Citation Placement Preview:
+                </span>
+                <span className="font-mono text-primary text-[10px]">
+                  {placement.context.replace(/_/g, " ")}
+                </span>
+              </div>
+              <p className="font-mono text-[11px] leading-relaxed text-foreground/90 break-words bg-background/80 p-2 rounded border border-border/50">
+                {placement.preview}
+              </p>
+            </div>
+
+            {activeHygiene?.isDuplicated && !activeHygiene.isExemptStatistic && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-900 dark:text-amber-200 mt-2">
+                <AlertTriangle className="size-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                <div className="space-y-0.5">
+                  <p className="font-semibold">Redundant Paragraph Citation</p>
+                  <p className="text-[11px] opacity-90">
+                    @{activeMatch.citationKey} is already cited in this paragraph. Citing the same work multiple times within a single paragraph is discouraged in journal publications unless distinguishing separate quantitative statistics.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {status === "already_cited" && (
+          <div className="space-y-2.5 py-2">
+            <div className="flex items-start gap-2.5 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-blue-900 dark:text-blue-100">
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-blue-600 dark:text-blue-400" />
+              <div>
+                <p className="font-semibold">
+                  Already supported by @{state.alreadyCitedKey || activeMatch?.citationKey} in this paragraph
+                </p>
+                <p className="mt-1 text-blue-900/80 dark:text-blue-200/80 leading-relaxed text-[11px]">
+                  Under citation best practices, use one citation at the end of a paragraph when all claims in that paragraph are supported by the same source and attribution is unambiguous. No duplicate citation needed.
+                </p>
+              </div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-2 text-xs">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-0.5">
+                Covered assertion:
+              </p>
+              <p className="italic text-foreground/80 line-clamp-2">"{text}"</p>
             </div>
           </div>
         )}
@@ -1163,12 +1406,12 @@ export function CitationReviewDock({
         {isCompleted ? (
           <div className="ml-auto">
             <Button type="button" size="xs" onClick={onClose} className="h-7 px-4 text-[11px]">
-              Finish Audit
+              Finish
             </Button>
           </div>
         ) : status === "found" && activeMatch ? (
           <>
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
               <Button
                 type="button"
                 variant="outline"
@@ -1196,25 +1439,130 @@ export function CitationReviewDock({
                   variant="ghost"
                   size="xs"
                   onClick={onReject}
-                  className="h-7 text-[11px] text-muted-foreground hover:text-foreground"
+                  className="h-7 text-[11px] text-muted-foreground hover:text-destructive"
+                  title="Reject this candidate citation"
                 >
-                  Reject
+                  Reject Citation
                 </Button>
               )}
             </div>
-            <Button
-              type="button"
-              size="xs"
-              className="h-7 gap-1 px-3 text-[11px] shrink min-w-0 max-w-[260px] overflow-hidden"
-              onClick={() => onApprove(activeMatch, range, draftFilePath)}
-              title={`Approve & Cite (@${activeMatch.citationKey})`}
-            >
-              <Check className="size-3 shrink-0" />
-              <span className="shrink-0 font-medium">Approve &amp; Cite</span>
-              <span className="truncate font-mono text-[10px] opacity-80">
-                (@{activeMatch.citationKey})
-              </span>
-            </Button>
+
+            <div className="flex items-center gap-1.5 shrink min-w-0">
+              {/* If recommendation requires review or is partial, offer direct evidence inspection */}
+              {(activeMatch.recommendation === "PARTIAL_SUPPORT" ||
+                activeMatch.recommendation === "NEEDS_REVIEW") &&
+                activeMatch.sourceFilePath && (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    onClick={() => handleOpenSourceForMatch(activeMatch)}
+                    className="h-7 gap-1 px-2.5 text-[11px] text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-500/10"
+                    title="Open full source passage and context in workspace"
+                  >
+                    <FileSearch className="size-3" />
+                    Review Evidence
+                  </Button>
+                )}
+
+              {activeMatch.recommendation === "REJECT" ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  className="h-7 gap-1 px-3 text-[11px] text-destructive border-destructive/30 hover:bg-destructive/10"
+                  onClick={onReject}
+                  title="Reject citation as evidence does not substantiate claim"
+                >
+                  <X className="size-3 shrink-0" />
+                  <span>Reject Citation</span>
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="xs"
+                  className={cn(
+                    "h-7 gap-1 px-3 text-[11px] shrink min-w-0 max-w-[280px] overflow-hidden",
+                    activeMatch.recommendation === "RECOMMEND"
+                      ? "bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                      : "bg-primary text-primary-foreground",
+                  )}
+                  onClick={() =>
+                    onApprove(activeMatch, range, draftFilePath, {
+                      selectedMatches:
+                        effectiveSelectedMatches.length > 1
+                          ? effectiveSelectedMatches
+                          : undefined,
+                      overrideParagraphDuplicate: Boolean(
+                        activeHygiene?.isDuplicated,
+                      ),
+                    })
+                  }
+                  title={`Approve & Cite (@${activeKeys.join("; @")})`}
+                >
+                  <Check className="size-3 shrink-0" />
+                  <span className="shrink-0 font-medium">
+                    {effectiveSelectedMatches.length > 1
+                      ? `Approve & Bundle (${effectiveSelectedMatches.length})`
+                      : activeHygiene?.isDuplicated
+                        ? "Approve & Cite Anyway"
+                        : "Approve & Cite"}
+                  </span>
+                  <span className="truncate font-mono text-[10px] opacity-80">
+                    (@{activeKeys.join("; @")})
+                  </span>
+                </Button>
+              )}
+            </div>
+          </>
+        ) : status === "already_cited" ? (
+          <>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                onClick={handleBackToDraft}
+                className="h-7 text-[11px]"
+                title="Focus the draft document tab"
+              >
+                Back to draft
+              </Button>
+              {activeMatch && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => onApprove(activeMatch, range, draftFilePath)}
+                  className="h-7 text-[11px] text-muted-foreground hover:text-foreground"
+                  title="Cite anyway even though already cited in this paragraph"
+                >
+                  Cite anyway
+                </Button>
+              )}
+            </div>
+            {isAudit ? (
+              <Button
+                type="button"
+                size="xs"
+                className="h-7 gap-1 px-3 text-[11px] bg-primary hover:bg-primary/90 text-primary-foreground font-medium"
+                onClick={onSkipClaim}
+                title="Next Claim (Already supported in this paragraph)"
+              >
+                <span>Next claim</span>
+                <SkipForward className="size-3" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                onClick={onClose}
+                className="h-7 text-[11px]"
+              >
+                Close
+              </Button>
+            )}
           </>
         ) : isAudit ? (
           <div className="flex items-center justify-between w-full">
@@ -1228,7 +1576,7 @@ export function CitationReviewDock({
               Skip to next claim <SkipForward className="size-3" />
             </Button>
             <Button type="button" variant="outline" size="xs" onClick={onClose} className="h-7 text-[11px]">
-              Exit Audit
+              Close Assistant
             </Button>
           </div>
         ) : (

@@ -521,6 +521,104 @@ export const MentionSearchHighlight = Extension.create<{
   },
 });
 
+function createSafeInlineDecorations(
+  doc: ProsemirrorNode,
+  from: number,
+  to: number,
+  className: string,
+): DecorationSet | null {
+  try {
+    const docSize = doc.content.size;
+    const clampedFrom = Math.max(0, Math.min(from, docSize));
+    const clampedTo = Math.max(clampedFrom, Math.min(to, docSize));
+    if (clampedFrom >= clampedTo) return null;
+
+    const $from = doc.resolve(clampedFrom);
+    const $to = doc.resolve(clampedTo);
+
+    if ($from.sameParent($to) && $from.parent.isTextblock) {
+      return DecorationSet.create(doc, [
+        Decoration.inline(clampedFrom, clampedTo, { class: className }),
+      ]);
+    }
+
+    const decorations: Decoration[] = [];
+    doc.nodesBetween(clampedFrom, clampedTo, (node, pos) => {
+      if (node.isTextblock) {
+        const start = Math.max(clampedFrom, pos + 1);
+        const end = Math.min(clampedTo, pos + node.nodeSize - 1);
+        if (start < end) {
+          decorations.push(Decoration.inline(start, end, { class: className }));
+        }
+      }
+    });
+
+    if (decorations.length > 0) {
+      return DecorationSet.create(doc, decorations);
+    }
+  } catch {
+    // Graceful fallback on any unexpected resolution mismatch
+  }
+  return null;
+}
+
+function findTextPositionsInNode(
+  node: ProsemirrorNode,
+  blockPos: number,
+  needle: string,
+): { from: number; to: number } | null {
+  const content = node.textContent;
+  const idx = content.indexOf(needle);
+  if (idx < 0) return null;
+  const endIdx = idx + needle.length;
+
+  let charOffset = 0;
+  let from: number | null = null;
+  let to: number | null = null;
+  let currentPos = blockPos + 1;
+
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    const textLen = child.isText ? (child.text?.length ?? 0) : 0;
+    const childStart = charOffset;
+    const childEnd = charOffset + textLen;
+
+    if (from === null && idx >= childStart && idx < childEnd) {
+      from = currentPos + (idx - childStart);
+    }
+    if (from !== null && endIdx > childStart && endIdx <= childEnd) {
+      to = currentPos + (endIdx - childStart);
+      break;
+    }
+
+    currentPos += child.nodeSize;
+    charOffset += textLen;
+  }
+
+  if (from !== null && to !== null && from < to) {
+    return { from, to };
+  }
+  return null;
+}
+
+function findRangeInDoc(
+  doc: ProsemirrorNode,
+  candidate: string,
+): { from: number; to: number } | null {
+  let found: { from: number; to: number } | null = null;
+  doc.descendants((node, pos) => {
+    if (found !== null) return false;
+    if (node.isTextblock) {
+      const match = findTextPositionsInNode(node, pos, candidate);
+      if (match) {
+        found = match;
+        return false;
+      }
+    }
+  });
+  return found as { from: number; to: number } | null;
+}
+
 export const CitationDockHighlightExtension = Extension.create<{
   getHighlight: () => CitationHighlightActiveDetail | null;
 }>({
@@ -542,64 +640,64 @@ export const CitationDockHighlightExtension = Extension.create<{
             }
 
             const docSize = state.doc.content.size;
-            let from = typeof highlight.from === "number" ? highlight.from : 0;
-            let to = typeof highlight.to === "number" ? highlight.to : 0;
-            const text = highlight.text?.trim();
+            const from = typeof highlight.from === "number" ? highlight.from : 0;
+            const to = typeof highlight.to === "number" ? highlight.to : 0;
+            const text = highlight.text?.trim() || "";
 
-            // 1. Check if existing from..to bounds accurately contain the target passage
+            // 1. Direct verify: if from..to matches or encompasses target text
             if (from >= 0 && to <= docSize && from < to) {
               const currentText = state.doc.textBetween(from, to, " ").trim();
-              if (!text || currentText === text || currentText.includes(text.slice(0, 20))) {
-                return DecorationSet.create(state.doc, [
-                  Decoration.inline(from, to, {
-                    class: "beeblio-citation-dock-highlight",
-                  }),
-                ]);
-              }
-            }
-
-            // 2. Fallback: locate text across doc descendants if positions shifted
-            if (text && text.length > 5) {
-              let matchedFrom: number | null = null;
-              let matchedTo: number | null = null;
-
-              state.doc.descendants((node, pos) => {
-                if (matchedFrom !== null) return false;
-                if (node.isTextblock && node.textContent.includes(text)) {
-                  const idx = node.textContent.indexOf(text);
-                  if (idx >= 0) {
-                    matchedFrom = pos + 1 + idx;
-                    matchedTo = matchedFrom + text.length;
-                    return false;
-                  }
-                }
-              });
-
               if (
-                matchedFrom !== null &&
-                matchedTo !== null &&
-                matchedFrom < matchedTo &&
-                matchedTo <= docSize
+                !text ||
+                currentText === text ||
+                currentText.includes(text) ||
+                text.includes(currentText) ||
+                (text.length >= 10 && currentText.includes(text.slice(0, 20))) ||
+                (currentText.length >= 10 && text.includes(currentText.slice(0, 20)))
               ) {
-                return DecorationSet.create(state.doc, [
-                  Decoration.inline(matchedFrom, matchedTo, {
-                    class: "beeblio-citation-dock-highlight",
-                  }),
-                ]);
+                const directDecos = createSafeInlineDecorations(
+                  state.doc,
+                  from,
+                  to,
+                  "beeblio-citation-dock-highlight",
+                );
+                if (directDecos) return directDecos;
               }
             }
 
-            // 3. Fallback: clamped from/to
-            if (from < to) {
-              const clampedFrom = Math.max(0, Math.min(from, docSize));
-              const clampedTo = Math.max(clampedFrom, Math.min(to, docSize));
-              if (clampedFrom < clampedTo) {
-                return DecorationSet.create(state.doc, [
-                  Decoration.inline(clampedFrom, clampedTo, {
-                    class: "beeblio-citation-dock-highlight",
-                  }),
-                ]);
+            // 2. Scan textblocks in document by text and sub-phrases
+            if (text.length >= 4) {
+              const candidates: string[] = [text, text.replace(/\s+/g, " ")];
+              if (text.length > 30) {
+                candidates.push(text.slice(0, 30));
               }
+              if (text.length > 50) {
+                candidates.push(text.slice(0, 45));
+              }
+
+              for (const candidate of candidates) {
+                const matched = findRangeInDoc(state.doc, candidate);
+                if (matched) {
+                  const searchDecos = createSafeInlineDecorations(
+                    state.doc,
+                    matched.from,
+                    matched.to,
+                    "beeblio-citation-dock-highlight",
+                  );
+                  if (searchDecos) return searchDecos;
+                }
+              }
+            }
+
+            // 3. Fallback: clamped coordinates
+            if (from < to) {
+              const fallbackDecos = createSafeInlineDecorations(
+                state.doc,
+                from,
+                to,
+                "beeblio-citation-dock-highlight",
+              );
+              if (fallbackDecos) return fallbackDecos;
             }
 
             return DecorationSet.empty;
@@ -609,6 +707,45 @@ export const CitationDockHighlightExtension = Extension.create<{
     ];
   },
 });
+
+/**
+ * Snaps a document range outward so it never starts or ends in the middle of a word.
+ * This prevents half-word selections (e.g. stopping at 'proces' instead of 'process')
+ * from corrupting citation search text or insertion positions.
+ */
+export function expandRangeToWordBoundaries(
+  doc: ProsemirrorNode,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  let newFrom = from;
+  let newTo = to;
+  const docSize = doc.content.size;
+
+  // Snap `from` backwards if inside a word
+  while (newFrom > 0) {
+    const prevChar = doc.textBetween(newFrom - 1, newFrom);
+    const currChar = doc.textBetween(newFrom, Math.min(newFrom + 1, docSize));
+    if (/[\p{L}\p{N}\-_]/u.test(prevChar) && /[\p{L}\p{N}\-_]/u.test(currChar)) {
+      newFrom--;
+    } else {
+      break;
+    }
+  }
+
+  // Snap `to` forwards if inside a word
+  while (newTo < docSize) {
+    const prevChar = doc.textBetween(Math.max(0, newTo - 1), newTo);
+    const currChar = doc.textBetween(newTo, Math.min(newTo + 1, docSize));
+    if (/[\p{L}\p{N}\-_]/u.test(prevChar) && /[\p{L}\p{N}\-_]/u.test(currChar)) {
+      newTo++;
+    } else {
+      break;
+    }
+  }
+
+  return { from: newFrom, to: newTo };
+}
 
 function CitationNodeView({ node, selected, updateAttributes }: NodeViewProps) {
   const [open, setOpen] = useState(false);
