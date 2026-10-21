@@ -12,6 +12,8 @@ services:
       - BEEBLIO_UI_HOST=0.0.0.0
       - PORT=3000
       - BEEBLIO_DATA_DIR=/app/.beeblio
+      - BEEBLIO_DOCKER=true
+      - BEEBLIO_PROJECTS_ROOT=/projects
     env_file:
       - path: .env.local
         required: false
@@ -19,6 +21,7 @@ services:
         required: false
     volumes:
       - beeblio_data:/app/.beeblio
+      - ${BEEBLIO_PROJECTS_DIR:-./projects}:/projects
 
 volumes:
   beeblio_data:

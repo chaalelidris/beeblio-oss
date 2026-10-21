@@ -53,3 +53,7 @@ spike/gotenberg-out
 .gcs-sa-key.json
 
 __pycache__
+
+# User project files linked via Docker / local
+projects/*
+!projects/.gitkeep

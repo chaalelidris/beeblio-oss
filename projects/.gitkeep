@@ -1,0 +1,1 @@
+# Keep this directory tracked so Docker volume mounts work out of the box

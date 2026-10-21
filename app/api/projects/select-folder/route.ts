@@ -1,10 +1,22 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { promises as fs } from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
 import { getUser } from "@/lib/auth/session";
 
 const execFileAsync = promisify(execFile);
 export const runtime = "nodejs";
+
+function isDockerEnvironment(): boolean {
+  if (process.env.BEEBLIO_DOCKER === "true" || process.env.DOCKER === "true") return true;
+  return existsSync("/.dockerenv");
+}
+
+function getProjectsRoot(): string {
+  if (process.env.BEEBLIO_PROJECTS_ROOT) return process.env.BEEBLIO_PROJECTS_ROOT;
+  if (existsSync("/projects")) return "/projects";
+  return "./projects";
+}
+
 
 async function selectFolderDarwin(): Promise<string | null> {
   const { stdout } = await execFileAsync(
@@ -120,6 +132,14 @@ export async function POST() {
   if (!(await getUser()))
     return Response.json({ error: "Unauthorized" }, { status: 401 });
 
+  // In Docker environments, trigger in-app directory browsing
+  if (isDockerEnvironment()) {
+    return Response.json({
+      mode: "browser",
+      rootPath: getProjectsRoot(),
+    });
+  }
+
   try {
     let folderPath: string | null = null;
     if (process.platform === "darwin") {
@@ -127,12 +147,20 @@ export async function POST() {
     } else if (process.platform === "win32") {
       folderPath = await selectFolderWindows();
     } else if (process.platform === "linux") {
-      folderPath = await selectFolderLinux();
+      try {
+        folderPath = await selectFolderLinux();
+      } catch {
+        // Fallback to in-app browser on headless Linux
+        return Response.json({
+          mode: "browser",
+          rootPath: getProjectsRoot(),
+        });
+      }
     } else {
-      return Response.json(
-        { error: "Enter an absolute folder path on this computer" },
-        { status: 501 },
-      );
+      return Response.json({
+        mode: "browser",
+        rootPath: getProjectsRoot(),
+      });
     }
 
     if (!folderPath) {

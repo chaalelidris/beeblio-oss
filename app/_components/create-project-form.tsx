@@ -13,12 +13,15 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { FolderBrowserDialog } from "./folder-browser-dialog";
 
 export function CreateProjectForm({ customTrigger }: { customTrigger?: React.ReactNode }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [selectingFolder, setSelectingFolder] = useState(false);
   const [open, setOpen] = useState(false);
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserInitialPath, setBrowserInitialPath] = useState("");
   const [name, setName] = useState("");
   const [folderPath, setFolderPath] = useState("");
 
@@ -40,11 +43,21 @@ export function CreateProjectForm({ customTrigger }: { customTrigger?: React.Rea
       }
       const response = await fetch("/api/projects/select-folder", { method: "POST" });
       const result = await response.json();
+      if (response.ok && result.mode === "browser") {
+        setBrowserInitialPath(result.rootPath || "");
+        setBrowserOpen(true);
+        return;
+      }
       if (response.ok && typeof result.folderPath === "string") {
         applySelectedFolder(result.folderPath);
       } else if (result.error && response.status !== 400) {
-        alert(result.error);
+        // If native dialog fails (e.g. headless Linux or Docker without env var), fallback to in-app browser
+        setBrowserInitialPath("/projects");
+        setBrowserOpen(true);
       }
+    } catch {
+      setBrowserInitialPath("/projects");
+      setBrowserOpen(true);
     } finally {
       setSelectingFolder(false);
     }
@@ -83,7 +96,8 @@ export function CreateProjectForm({ customTrigger }: { customTrigger?: React.Rea
   }
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => {
+    <>
+      <Dialog open={open} onOpenChange={(nextOpen) => {
       setOpen(nextOpen);
       if (!nextOpen) {
         setName("");
@@ -142,7 +156,9 @@ export function CreateProjectForm({ customTrigger }: { customTrigger?: React.Rea
                 {selectingFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : "Browse"}
               </Button>
             </div>
-            {/* <p className="text-xs text-muted-foreground">Files stay here. Missing research folders, references.bib, and the literature matrix are created without replacing existing files.</p> */}
+            <p className="text-[11px] text-muted-foreground">
+              Files are stored in this folder. In Docker, select a folder within <code className="rounded bg-muted px-1 font-mono">/projects</code> (mounted from <code className="rounded bg-muted px-1 font-mono">./projects</code> on your computer).
+            </p>
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor="description" className="text-sm font-medium">
@@ -169,5 +185,13 @@ export function CreateProjectForm({ customTrigger }: { customTrigger?: React.Rea
         </form>
       </DialogContent>
     </Dialog>
+    <FolderBrowserDialog
+      open={browserOpen}
+      onOpenChange={setBrowserOpen}
+      initialPath={browserInitialPath || folderPath}
+      onSelectFolder={(selected) => applySelectedFolder(selected)}
+    />
+    </>
   );
 }
+

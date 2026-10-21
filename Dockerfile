@@ -96,14 +96,15 @@ COPY --from=builder /app/types ./types
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/next.config.ts ./next.config.ts
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 
-# Ensure persistent data directory exists
-RUN mkdir -p /app/.beeblio
+
+# Ensure persistent data and projects directories exist
+RUN mkdir -p /app/.beeblio /projects
 
 EXPOSE 3000
 
-VOLUME ["/app/.beeblio"]
+VOLUME ["/app/.beeblio", "/projects"]
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["node", "scripts/local-start.mjs"]
