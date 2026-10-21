@@ -10,6 +10,8 @@ export interface LocalServerOptions {
   layout?: "checkout" | "bundle";
   /** Checkout only: `dev` runs the hot-reloading servers; `start` serves the production builds. */
   mode?: "dev" | "start";
+  /** Hostname for the Next.js UI server. Defaults to BEEBLIO_UI_HOST or 127.0.0.1. */
+  uiHost?: string;
   uiPort?: number;
   agentPort?: number;
   /** Node.js 24 executable that runs the servers. Defaults to the current process. */

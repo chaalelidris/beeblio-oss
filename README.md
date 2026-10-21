@@ -39,6 +39,34 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The root URL redirects to `
 
 Choose **Link Project Folder** to select a folder. You can also paste its absolute path. Beeblio stores the resolved path in SQLite and works with the files in place. On linking, it adds any missing canonical files & folders: `1-References/`, `2-Data/`, `3-Analysis/`, and `4-Reports/` folders, plus `1-References/references.bib` and `3-Analysis/literature-matrix.matrix`. Existing files are preserved. Agent file tools display the folder as `/workspace`; agent shell commands run on your computer with that folder as the working directory. `$BEEBLIO_PROJECT_DIR` contains its absolute path.
 
+## Run with Docker
+
+Beeblio includes a production-ready, multi-stage `Dockerfile` and `docker-compose.yml` that run the SQLite migrations, Next.js UI, Eve agent, and all system tools (Python 3, pandas, python-docx, Pandoc, Poppler, and headless LibreOffice) inside a container:
+
+```bash
+# 1. (Optional) Provide your environment keys in .env.local
+cp .env.example .env.local
+
+# 2. Build and start the container
+docker compose up -d
+
+# 3. View logs
+docker compose logs -f
+
+# 4. Open in your browser
+# http://localhost:3000
+```
+
+- Data, settings, and SQLite database are persisted across container restarts in the `beeblio_data` Docker volume (mounted to `/app/.beeblio`).
+- To run development mode with volume bind mounts and live code reloading:
+  ```bash
+  docker compose -f docker-compose.dev.yml up
+  ```
+- To stop the container:
+  ```bash
+  docker compose down
+  ```
+
 ## Desktop app
 
 Beeblio also runs as a desktop app for Apple Silicon Macs (macOS 12 or later) and Windows, in its own window. It includes everything it needs to run, so you don't need Node.js or a checkout.

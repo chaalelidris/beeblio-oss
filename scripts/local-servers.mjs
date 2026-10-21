@@ -24,6 +24,7 @@ export async function startLocalServers({
   root,
   layout = "checkout",
   mode = "dev",
+  uiHost = process.env.BEEBLIO_UI_HOST || process.env.HOST || "127.0.0.1",
   uiPort = 3000,
   agentPort = 2000,
   nodePath = process.execPath,
@@ -51,7 +52,7 @@ export async function startLocalServers({
   }
 
   // Resolved before anything starts so a missing install fails with a fix, not mid-launch.
-  const commands = serverCommands({ root, layout, mode, uiPort, agentPort, dataDir, databasePath: env.LOCAL_DB_PATH });
+  const commands = serverCommands({ root, layout, mode, uiHost, uiPort, agentPort, dataDir, databasePath: env.LOCAL_DB_PATH });
 
   // On macOS and Linux each long-running server leads its own process group, so
   // stopping it also reaches its workers and the agent's shell commands (see
@@ -126,14 +127,14 @@ export function missingProductionBuilds(root) {
  * the servers' own entry points; Eve then needs its working directory in the
  * data folder, because it keeps workflow state in .eve/ under it.
  */
-function serverCommands({ root, layout, mode, uiPort, agentPort, dataDir, databasePath }) {
+function serverCommands({ root, layout, mode, uiHost, uiPort, agentPort, dataDir, databasePath }) {
   // See parent-watchdog.mjs. --import takes a URL, which a Windows path with a drive letter is not.
   const watchdog = (file) => ["--import", pathToFileURL(file).href];
   if (layout === "bundle") {
     const guarded = watchdog(path.join(root, "parent-watchdog.mjs"));
     return {
       migrate: { args: [path.join(root, "ui", "migrate.mjs"), databasePath, path.join(root, "drizzle")], cwd: dataDir },
-      next: { args: [...guarded, path.join(root, "ui", "server.js")], cwd: dataDir, env: { PORT: String(uiPort), HOSTNAME: HOST, NODE_ENV: "production" } },
+      next: { args: [...guarded, path.join(root, "ui", "server.js")], cwd: dataDir, env: { PORT: String(uiPort), HOSTNAME: uiHost, NODE_ENV: "production" } },
       eve: { args: [...guarded, path.join(root, "agent", "server", "index.mjs")], cwd: dataDir, env: { PORT: String(agentPort), HOST, NODE_ENV: "production" } },
     };
   }
@@ -143,7 +144,7 @@ function serverCommands({ root, layout, mode, uiPort, agentPort, dataDir, databa
   const eve = binEntry(root, "eve");
   return {
     migrate: { args: [path.join(root, "scripts", "migrate.mjs"), databasePath, path.join(root, "drizzle")], cwd: root },
-    next: { args: [...guarded, next, mode, "--hostname", HOST, "--port", String(uiPort)], cwd: root },
+    next: { args: [...guarded, next, mode, "--hostname", uiHost, "--port", String(uiPort)], cwd: root },
     eve: { args: [...guarded, eve, ...(mode === "dev" ? ["dev", "--no-ui"] : ["start"]), "--host", HOST, "--port", String(agentPort)], cwd: root },
   };
 }

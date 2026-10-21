@@ -1,6 +1,7 @@
 # Secrets never enter image layers; the compose stack injects .env.local at
 # runtime via env_file. Build state and dev-only trees stay out of the context.
 .git
+.beeblio
 .next
 .output
 .eve
@@ -11,8 +12,12 @@ node_modules
 local-files
 local-s3
 local-agent-libs
+desktop/build
+desktop/dist
 docs
 *.ndjson
+*.log
 tsconfig.tsbuildinfo
 .DS_Store
 test-streamdown.js
+
